@@ -5,10 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pye57
 import pytest
 from plyfile import PlyData, PlyElement
 
-from packages.pipeline.loader import load_ply, load_point_cloud
+from packages.pipeline.loader import load_e57, load_ply, load_point_cloud
 
 
 def _write_ply(path: Path, points: np.ndarray) -> None:
@@ -20,6 +21,18 @@ def _write_ply(path: Path, points: np.ndarray) -> None:
     structured["z"] = points[:, 2]
     el = PlyElement.describe(structured, "vertex")
     PlyData([el], text=False).write(str(path))
+
+
+def _write_e57(path: Path, points: np.ndarray) -> None:
+    """Helper: write an (N, 3) array as an E57 file."""
+    e57 = pye57.E57(str(path), mode="w")
+    data = {
+        "cartesianX": points[:, 0].astype(np.float64),
+        "cartesianY": points[:, 1].astype(np.float64),
+        "cartesianZ": points[:, 2].astype(np.float64),
+    }
+    e57.write_scan_raw(data)
+    e57.close()
 
 
 class TestLoadPly:
@@ -40,6 +53,28 @@ class TestLoadPly:
         loaded = load_point_cloud(ply_file)
         assert loaded.shape == (10, 3)
 
+
+class TestLoadE57:
+    def test_round_trip(self, tmp_path: Path):
+        pts = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float64)
+        e57_file = tmp_path / "test.e57"
+        _write_e57(e57_file, pts)
+
+        loaded = load_e57(e57_file)
+        assert loaded.shape == (2, 3)
+        np.testing.assert_allclose(loaded, pts, atol=1e-10)
+
+    def test_load_point_cloud_dispatch(self, tmp_path: Path):
+        pts = np.random.default_rng(0).random((10, 3))
+        e57_file = tmp_path / "cloud.e57"
+        _write_e57(e57_file, pts)
+
+        loaded = load_point_cloud(e57_file)
+        assert loaded.shape == (10, 3)
+        np.testing.assert_allclose(loaded, pts, atol=1e-10)
+
+
+class TestUnsupportedFormat:
     def test_unsupported_extension(self, tmp_path: Path):
         fake = tmp_path / "file.xyz"
         fake.write_text("dummy")
