@@ -2,13 +2,21 @@
 
 The detector iteratively fits planes to the point cloud and classifies each
 detected plane as floor, ceiling, or wall based on its normal orientation.
+
+Coplanar but spatially separated surfaces (e.g. two walls on opposite sides
+of a hallway) are split into individual segments using DBSCAN clustering.
 """
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
+from scipy.spatial import cKDTree
 
 from packages.core.types import BBox, DetectedPlane, PlaneKind, Vec3
+
+logger = logging.getLogger(__name__)
 
 # ── RANSAC single-plane fit ──────────────────────────────────────────
 
@@ -116,6 +124,58 @@ def _inlier_bounds(points: np.ndarray, mask: np.ndarray) -> BBox:
     )
 
 
+def _cluster_inliers(
+    points: np.ndarray,
+    cluster_eps: float = 0.3,
+    min_cluster_size: int = 30,
+) -> list[np.ndarray]:
+    """Split a set of inlier points into spatially connected clusters.
+
+    Uses a simple DBSCAN-like approach via a KD-tree: starting from an
+    unvisited point, flood-fill all neighbours within *cluster_eps*.
+    Returns a list of boolean masks, one per cluster.
+
+    This ensures that two wall segments on the same geometric plane but
+    separated by a doorway or hallway become separate detections.
+    """
+    n = len(points)
+    if n == 0:
+        return []
+
+    tree = cKDTree(points)
+    visited = np.zeros(n, dtype=bool)
+    clusters: list[np.ndarray] = []
+
+    for i in range(n):
+        if visited[i]:
+            continue
+
+        # BFS / flood-fill from point i
+        queue = [i]
+        visited[i] = True
+        members = []
+
+        while queue:
+            idx = queue.pop()
+            members.append(idx)
+            neighbours = tree.query_ball_point(points[idx], cluster_eps)
+            for nb in neighbours:
+                if not visited[nb]:
+                    visited[nb] = True
+                    queue.append(nb)
+
+        if len(members) >= min_cluster_size:
+            mask = np.zeros(n, dtype=bool)
+            mask[members] = True
+            clusters.append(mask)
+
+    logger.info(
+        f"  🔗 Clustered {n:,} inliers into {len(clusters)} segment(s) "
+        f"(eps={cluster_eps}, min_size={min_cluster_size})"
+    )
+    return clusters
+
+
 # ── public API ───────────────────────────────────────────────────────
 
 def detect_planes(
@@ -125,12 +185,18 @@ def detect_planes(
     max_iterations: int = 1000,
     distance_threshold: float = 0.02,
     min_inlier_ratio: float = 0.02,
+    cluster_eps: float = 0.3,
+    min_cluster_size: int = 30,
     seed: int | None = None,
 ) -> list[DetectedPlane]:
     """Iteratively detect up to *max_planes* planes from the cloud.
 
     After each plane is detected its inliers are removed and the next
     iteration runs on the remaining points.
+
+    Coplanar but spatially disconnected surfaces are split into separate
+    segments via spatial clustering, so a wall in one room won't merge
+    with a coplanar wall across a hallway.
     """
     rng = np.random.default_rng(seed)
     remaining = points.copy()
@@ -141,7 +207,7 @@ def detect_planes(
     # We need to keep track of which original indices are still in play
     active_mask = np.ones(len(points), dtype=bool)
 
-    for _ in range(max_planes):
+    for iteration in range(max_planes):
         result = _fit_plane_ransac(
             remaining,
             max_iterations=max_iterations,
@@ -155,24 +221,43 @@ def detect_planes(
         normal, offset, inlier_mask = result
         kind = _classify_plane(normal, offset)
 
-        # Compute bounds against the original point set
         # Map inlier_mask back to original indices
         active_indices = np.where(active_mask)[0]
         original_inlier_mask = np.zeros(len(original), dtype=bool)
         original_inlier_mask[active_indices[inlier_mask]] = True
-        bounds = _inlier_bounds(original, original_inlier_mask)
 
-        planes.append(
-            DetectedPlane(
-                kind=kind,
-                normal=Vec3(x=float(normal[0]), y=float(normal[1]), z=float(normal[2])),
-                offset=float(offset),
-                inlier_count=int(inlier_mask.sum()),
-                bounds=bounds,
-            )
+        # Cluster the inlier points to split spatially separated segments
+        inlier_points = original[original_inlier_mask]
+        clusters = _cluster_inliers(
+            inlier_points,
+            cluster_eps=cluster_eps,
+            min_cluster_size=min_cluster_size,
         )
 
-        # Remove inliers from the working set
+        # Map each cluster back to original-space indices
+        inlier_original_indices = np.where(original_inlier_mask)[0]
+
+        for cluster_mask in clusters:
+            cluster_original_mask = np.zeros(len(original), dtype=bool)
+            cluster_original_mask[inlier_original_indices[cluster_mask]] = True
+            bounds = _inlier_bounds(original, cluster_original_mask)
+
+            planes.append(
+                DetectedPlane(
+                    kind=kind,
+                    normal=Vec3(x=float(normal[0]), y=float(normal[1]), z=float(normal[2])),
+                    offset=float(offset),
+                    inlier_count=int(cluster_mask.sum()),
+                    bounds=bounds,
+                )
+            )
+
+        logger.info(
+            f"  Plane {iteration}: {kind.value} — {int(inlier_mask.sum()):,} inliers → "
+            f"{len(clusters)} segment(s)"
+        )
+
+        # Remove ALL inliers from the working set (even small clusters)
         remaining = remaining[~inlier_mask]
         active_mask[active_indices[inlier_mask]] = False
 
