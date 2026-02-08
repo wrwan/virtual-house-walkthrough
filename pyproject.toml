@@ -14,19 +14,23 @@ dependencies = [
     "pydantic>=2.0",
     "click>=8.0",
     "scipy>=1.10",
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+    "python-multipart>=0.0.5",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
     "ruff>=0.4",
+    "httpx>=0.24",
 ]
 
 [project.scripts]
 dt-pipeline = "packages.pipeline.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["packages*"]
+include = ["packages*", "apps*"]
 
 [tool.ruff]
 line-length = 100

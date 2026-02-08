@@ -13,3 +13,5 @@ venv/
 .ruff_cache/
 .pytest_cache/
 node_modules/
+viewer/node_modules/
+viewer/dist/
