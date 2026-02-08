@@ -16,6 +16,7 @@ from apps.api.main import _state, app
 def client():
     """Fresh test client with cleared state."""
     _state["points"] = None
+    _state["colors"] = None
     _state["model"] = None
     _state["source_file"] = None
     return TestClient(app)

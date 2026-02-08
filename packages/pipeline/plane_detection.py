@@ -82,8 +82,11 @@ def _classify_plane(
     ceiling using relative height.
     """
     nz = abs(normal[2])
+    # DISABLED: Only detecting walls for now
+    # if nz > vertical_threshold:
+    #     return PlaneKind.FLOOR  # placeholder – relabelled later
     if nz > vertical_threshold:
-        return PlaneKind.FLOOR  # placeholder – relabelled later
+        return PlaneKind.FLOOR  # still classified but filtered out later
     return PlaneKind.WALL
 
 
@@ -173,5 +176,9 @@ def detect_planes(
         remaining = remaining[~inlier_mask]
         active_mask[active_indices[inlier_mask]] = False
 
-    _relabel_horizontal_planes(planes)
+    # DISABLED: Floor/ceiling relabelling — only walls for now
+    # _relabel_horizontal_planes(planes)
+
+    # Filter to walls only
+    planes = [p for p in planes if p.kind == PlaneKind.WALL]
     return planes

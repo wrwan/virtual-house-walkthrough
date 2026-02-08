@@ -21,6 +21,12 @@ from packages.core.types import ParametricModel
 from packages.pipeline.loader import load_point_cloud
 from packages.pipeline.process import process_scan
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Digital Twin API", version="0.1.0")
@@ -35,6 +41,7 @@ app.add_middleware(
 # ── In-memory store (single-scan MVP) ────────────────────────────────
 _state: dict = {
     "points": None,       # np.ndarray (N, 3) or None
+    "colors": None,       # np.ndarray (N, 3) or None — RGB in [0, 1]
     "model": None,        # ParametricModel or None
     "source_file": None,  # original filename
 }
@@ -55,39 +62,54 @@ async def upload_scan(file: UploadFile = File(...)):
     if suffix not in (".ply", ".e57"):
         raise HTTPException(400, f"Unsupported format '{suffix}'. Use .ply or .e57")
 
+    logger.info(f"📥 Receiving file: {file.filename} ({suffix})")
+
     # Save to temp file
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        logger.info(f"💾 Saving to temporary file: {tmp.name}")
         shutil.copyfileobj(file.file, tmp)
         tmp_path = Path(tmp.name)
 
     try:
         # Load raw points
-        points = load_point_cloud(tmp_path)
+        logger.info(f"📂 Loading point cloud from {file.filename}...")
+        cloud_data = load_point_cloud(tmp_path)
+        points = cloud_data["positions"]
+        colors = cloud_data["colors"]
+        logger.info(f"✅ Loaded {len(points):,} points")
+        if colors is not None:
+            logger.info(f"🎨 RGB color data available")
 
         # Run processing pipeline
+        logger.info(f"⚙️  Running processing pipeline...")
         model = process_scan(tmp_path, seed=42)
         model.source_file = file.filename  # use original name, not temp path
+        logger.info(f"✅ Processing complete: {len(model.planes)} planes detected")
 
         # Store in memory
         _state["points"] = points
+        _state["colors"] = colors
         _state["model"] = model
         _state["source_file"] = file.filename
 
+        logger.info(f"🎉 Upload and processing successful!")
         return {
             "filename": file.filename,
             "point_count": len(points),
             "planes_detected": len(model.planes),
         }
     except Exception as e:
-        logger.exception("Processing failed")
+        logger.exception("❌ Processing failed")
         raise HTTPException(500, f"Processing failed: {e}")
     finally:
+        logger.info(f"🧹 Cleaning up temporary file")
         tmp_path.unlink(missing_ok=True)
 
 
 @app.get("/points")
 def get_points():
-    """Return point cloud as a flat JSON array of [x, y, z, ...] coordinates.
+    """Return point cloud as a flat JSON array of [x, y, z, ...] coordinates
+    plus optional RGB colors.
 
     For performance with large clouds we send a flat Float32 list that the
     viewer can directly load into a Three.js BufferGeometry.
@@ -96,15 +118,30 @@ def get_points():
         raise HTTPException(404, "No scan uploaded yet")
 
     pts: np.ndarray = _state["points"]
+    colors: np.ndarray | None = _state["colors"]
+    logger.info(f"📊 Preparing {len(pts):,} points for viewer")
 
-    # Downsample for the viewer if the cloud is very large
-    max_viewer_points = 200_000
-    if len(pts) > max_viewer_points:
-        step = len(pts) // max_viewer_points
-        pts = pts[::step][:max_viewer_points]
+    # # Downsample for the viewer if the cloud is very large
+    # max_viewer_points = 200_000
+    # if len(pts) > max_viewer_points:
+    #     step = len(pts) // max_viewer_points
+    #     indices = np.arange(0, len(pts), step)[:max_viewer_points]
+    #     pts = pts[indices]
+    #     if colors is not None:
+    #         colors = colors[indices]
+    #     logger.info(f"⬇️  Downsampled to {len(pts):,} points for performance")
 
-    flat = pts.astype(np.float32).ravel().tolist()
-    return {"count": len(pts), "positions": flat}
+    flat_positions = pts.astype(np.float32).ravel().tolist()
+
+    result = {"count": len(pts), "positions": flat_positions, "has_colors": colors is not None}
+    if colors is not None:
+        flat_colors = colors.astype(np.float32).ravel().tolist()
+        result["colors"] = flat_colors
+        logger.info(f"🎨 Sending {len(pts):,} points with RGB colors to viewer")
+    else:
+        logger.info(f"✅ Sending {len(pts):,} points (no RGB) to viewer")
+
+    return result
 
 
 @app.get("/model")
@@ -114,4 +151,5 @@ def get_model():
         raise HTTPException(404, "No scan uploaded yet")
 
     model: ParametricModel = _state["model"]
+    logger.info(f"📐 Sending parametric model with {len(model.planes)} planes")
     return JSONResponse(content=json.loads(model.model_dump_json()))

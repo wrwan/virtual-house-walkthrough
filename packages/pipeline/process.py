@@ -33,7 +33,8 @@ def process_scan(
     """
     input_path = Path(input_path)
     logger.info("Loading %s …", input_path.name)
-    raw_points = load_point_cloud(input_path)
+    cloud_data = load_point_cloud(input_path)
+    raw_points = cloud_data["positions"]
     logger.info("Loaded %d points", len(raw_points))
 
     logger.info("Down-sampling (voxel_size=%.3f) …", voxel_size)

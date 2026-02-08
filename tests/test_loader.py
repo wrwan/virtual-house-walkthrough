@@ -41,17 +41,18 @@ class TestLoadPly:
         ply_file = tmp_path / "test.ply"
         _write_ply(ply_file, pts)
 
-        loaded = load_ply(ply_file)
-        assert loaded.shape == (2, 3)
-        np.testing.assert_allclose(loaded, pts, atol=1e-5)
+        result = load_ply(ply_file)
+        assert result["positions"].shape == (2, 3)
+        np.testing.assert_allclose(result["positions"], pts, atol=1e-5)
+        assert result["colors"] is None  # no RGB in this test file
 
     def test_load_point_cloud_dispatch(self, tmp_path: Path):
         pts = np.random.default_rng(0).random((10, 3)).astype(np.float32)
         ply_file = tmp_path / "cloud.ply"
         _write_ply(ply_file, pts)
 
-        loaded = load_point_cloud(ply_file)
-        assert loaded.shape == (10, 3)
+        result = load_point_cloud(ply_file)
+        assert result["positions"].shape == (10, 3)
 
 
 class TestLoadE57:
@@ -60,18 +61,19 @@ class TestLoadE57:
         e57_file = tmp_path / "test.e57"
         _write_e57(e57_file, pts)
 
-        loaded = load_e57(e57_file)
-        assert loaded.shape == (2, 3)
-        np.testing.assert_allclose(loaded, pts, atol=1e-10)
+        result = load_e57(e57_file)
+        assert result["positions"].shape == (2, 3)
+        np.testing.assert_allclose(result["positions"], pts, atol=1e-10)
+        assert result["colors"] is None  # no RGB in this test file
 
     def test_load_point_cloud_dispatch(self, tmp_path: Path):
         pts = np.random.default_rng(0).random((10, 3))
         e57_file = tmp_path / "cloud.e57"
         _write_e57(e57_file, pts)
 
-        loaded = load_point_cloud(e57_file)
-        assert loaded.shape == (10, 3)
-        np.testing.assert_allclose(loaded, pts, atol=1e-10)
+        result = load_point_cloud(e57_file)
+        assert result["positions"].shape == (10, 3)
+        np.testing.assert_allclose(result["positions"], pts, atol=1e-10)
 
 
 class TestUnsupportedFormat:
