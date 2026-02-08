@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -45,7 +44,7 @@ class DetectedPlane(BaseModel):
     normal: Vec3
     offset: float = Field(description="Signed distance from origin (Hesse normal form: n·x = d)")
     inlier_count: int = 0
-    bounds: Optional[BBox] = None
+    bounds: BBox | None = None
 
 
 # ── parametric model ─────────────────────────────────────────────────
@@ -59,7 +58,7 @@ class ParametricModel(BaseModel):
     units: str = "metres"
     source_file: str = ""
     point_count: int = 0
-    bounds: Optional[BBox] = None
+    bounds: BBox | None = None
     planes: list[DetectedPlane] = Field(default_factory=list)
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from packages.pipeline.preprocess import compute_bounds, voxel_downsample
 
@@ -30,7 +31,5 @@ class TestVoxelDownsample:
         np.testing.assert_allclose(ds[0], [0.015, 0.015, 0.015])
 
     def test_invalid_voxel_size(self):
-        import pytest
-
         with pytest.raises(ValueError):
             voxel_downsample(np.zeros((5, 3)), voxel_size=0)
