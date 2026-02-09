@@ -737,5 +737,165 @@ def normalize_walls(
             bounds=new_bounds,
         ))
 
+    # ── 5. snap wall endpoints to meet at corners ─────────────
+    result = _snap_corners(result, snap_distance=1.0)
+
     logger.info("  ✅ Normalized %d walls", len(result))
     return result
+
+
+def _wall_long_axis(bounds: BBox) -> int:
+    """Return the axis index (0=X, 1=Y) of the wall's long (length) direction."""
+    dx = bounds.max.x - bounds.min.x
+    dy = bounds.max.y - bounds.min.y
+    return 0 if dx >= dy else 1
+
+
+def _wall_thin_axis(bounds: BBox) -> int:
+    """Return the axis index (0=X, 1=Y) of the wall's thin (thickness) direction."""
+    dx = bounds.max.x - bounds.min.x
+    dy = bounds.max.y - bounds.min.y
+    return 0 if dx < dy else 1
+
+
+def _snap_corners(
+    planes: list[DetectedPlane],
+    snap_distance: float = 1.0,
+) -> list[DetectedPlane]:
+    """Extend or shrink wall endpoints so perpendicular walls meet at corners.
+
+    For each wall, look at both endpoints along its long axis.  If a nearby
+    wall is roughly perpendicular and its thin-axis centre is close to this
+    endpoint, snap this wall's endpoint to the other wall's centre-plane
+    along the thin axis.  This makes the walls meet cleanly.
+
+    The algorithm also extends walls slightly so they overlap by half the
+    other wall's thickness — producing the typical architectural corner
+    where one wall butts into the face of the perpendicular wall.
+    """
+    if len(planes) < 2:
+        return planes
+
+    # Pre-compute per-wall info: long axis, thin axis, centres, extents
+    infos = []
+    for p in planes:
+        if p.bounds is None:
+            infos.append(None)
+            continue
+        b = p.bounds
+        bmin = np.array([b.min.x, b.min.y, b.min.z])
+        bmax = np.array([b.max.x, b.max.y, b.max.z])
+        long_ax = _wall_long_axis(b)
+        thin_ax = _wall_thin_axis(b)
+        center = (bmin + bmax) / 2.0
+        infos.append({
+            "bmin": bmin.copy(),
+            "bmax": bmax.copy(),
+            "long": long_ax,
+            "thin": thin_ax,
+            "center": center,
+            "thickness": bmax[thin_ax] - bmin[thin_ax],
+        })
+
+    # For each wall, try to snap each long-axis endpoint to a perpendicular wall
+    for i, info_i in enumerate(infos):
+        if info_i is None:
+            continue
+        long_i = info_i["long"]
+        thin_i = info_i["thin"]
+
+        for j, info_j in enumerate(infos):
+            if j == i or info_j is None:
+                continue
+
+            long_j = info_j["long"]
+            thin_j = info_j["thin"]
+
+            # Only snap walls whose long axes are different (i.e. roughly perpendicular)
+            if long_i == long_j:
+                continue
+
+            # Wall i's long axis == wall j's thin axis (they are perpendicular)
+            # Check if j's centre along its thin axis is near i's endpoint
+            # along i's long axis.
+            j_center_on_i_long = info_j["center"][long_i]
+
+            # Distance from j's thin-axis centre to i's min/max long-axis endpoint
+            i_min_end = info_i["bmin"][long_i]
+            i_max_end = info_i["bmax"][long_i]
+
+            # Also check that the walls overlap in the OTHER axis (thin_i = long_j)
+            # i.e. wall j's extent along long_j overlaps wall i's thin-axis centre
+            i_thin_center = info_i["center"][thin_i]
+            j_min_long = info_j["bmin"][long_j]
+            j_max_long = info_j["bmax"][long_j]
+
+            if not (j_min_long - snap_distance <= i_thin_center <= j_max_long + snap_distance):
+                continue  # walls are not in the same neighbourhood
+
+            half_j_thick = info_j["thickness"] / 2.0
+            max_trim = snap_distance * 0.5  # allow trimming up to half the snap window
+
+            # Snap i's min endpoint — only if extending or moderately trimming.
+            # A large positive trim means the wall passes THROUGH the corner
+            # and the endpoint is on the far side — don't snap that.
+            if abs(i_min_end - j_center_on_i_long) <= snap_distance:
+                snapped_val = j_center_on_i_long - half_j_thick
+                trim = snapped_val - i_min_end  # positive = trimming, negative = extending
+                if trim <= max_trim:
+                    info_i["bmin"][long_i] = snapped_val
+
+            # Snap i's max endpoint
+            if abs(i_max_end - j_center_on_i_long) <= snap_distance:
+                snapped_val = j_center_on_i_long + half_j_thick
+                trim = i_max_end - snapped_val  # positive = trimming, negative = extending
+                if trim <= max_trim:
+                    info_i["bmax"][long_i] = snapped_val
+                snapped_val = j_center_on_i_long + half_j_thick
+                info_i["bmax"][long_i] = snapped_val
+
+    # Also snap perpendicular walls' long-axis endpoints to each other's faces
+    # e.g. wall j should extend to reach i's face too
+    # (handled symmetrically because we iterate all i,j pairs above)
+
+    # Rebuild planes with snapped bounds
+    out: list[DetectedPlane] = []
+    for i, plane in enumerate(planes):
+        info = infos[i]
+        if info is None:
+            out.append(plane)
+            continue
+
+        bmin = info["bmin"]
+        bmax = info["bmax"]
+
+        # Safety: ensure min < max
+        for k in range(3):
+            if bmin[k] > bmax[k]:
+                bmin[k], bmax[k] = bmax[k], bmin[k]
+
+        new_bounds = BBox(
+            min=Vec3(x=float(bmin[0]), y=float(bmin[1]), z=float(bmin[2])),
+            max=Vec3(x=float(bmax[0]), y=float(bmax[1]), z=float(bmax[2])),
+        )
+
+        out.append(DetectedPlane(
+            kind=plane.kind,
+            normal=plane.normal,
+            offset=plane.offset,
+            inlier_count=plane.inlier_count,
+            bounds=new_bounds,
+        ))
+
+    snapped_count = sum(
+        1 for i, info in enumerate(infos)
+        if info is not None and (
+            not np.allclose(info["bmin"], [planes[i].bounds.min.x, planes[i].bounds.min.y, planes[i].bounds.min.z], atol=1e-6)
+            or not np.allclose(info["bmax"], [planes[i].bounds.max.x, planes[i].bounds.max.y, planes[i].bounds.max.z], atol=1e-6)
+        )
+        if planes[i].bounds is not None
+    )
+    if snapped_count:
+        logger.info("  🔗 Snapped corners on %d / %d walls", snapped_count, len(planes))
+
+    return out
