@@ -17,8 +17,9 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from packages.core.types import ParametricModel
+from packages.core.types import DetectedPlane, ParametricModel
 from packages.pipeline.loader import load_point_cloud
+from packages.pipeline.plane_detection import refine_wall_from_corners
 from packages.pipeline.process import process_scan
 
 # Configure logging
@@ -153,3 +154,39 @@ def get_model():
     model: ParametricModel = _state["model"]
     logger.info(f"📐 Sending parametric model with {len(model.planes)} planes")
     return JSONResponse(content=json.loads(model.model_dump_json()))
+
+
+from pydantic import BaseModel as PydanticBaseModel
+
+
+class ManualWallRequest(PydanticBaseModel):
+    """Body for the manual wall endpoint."""
+    corners: list[list[float]]  # [[x, y, z], ...] — 3 or 4 corners
+    search_radius: float = 0.3
+
+
+@app.post("/manual-wall")
+def add_manual_wall(req: ManualWallRequest):
+    """User picks corners in the viewer → refine against the point cloud."""
+    if _state["points"] is None:
+        raise HTTPException(404, "No scan uploaded yet")
+    if len(req.corners) < 3:
+        raise HTTPException(400, "Need at least 3 corners")
+
+    logger.info(f"🖐️  Manual wall requested with {len(req.corners)} corners")
+    try:
+        plane = refine_wall_from_corners(
+            _state["points"],
+            req.corners,
+            search_radius=req.search_radius,
+        )
+    except Exception as e:
+        logger.exception("Manual wall refinement failed")
+        raise HTTPException(500, f"Refinement failed: {e}")
+
+    # Append to the current model
+    model: ParametricModel = _state["model"]
+    model.planes.append(plane)
+    logger.info(f"✅ Manual wall added — model now has {len(model.planes)} planes")
+
+    return JSONResponse(content=json.loads(plane.model_dump_json()))

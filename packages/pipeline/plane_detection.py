@@ -301,6 +301,132 @@ def _fuse_coplanar_planes(
     return fused
 
 
+# ── manual wall refinement ───────────────────────────────────────────
+
+def refine_wall_from_corners(
+    points: np.ndarray,
+    corners: list[list[float]],
+    *,
+    search_radius: float = 0.3,
+    distance_threshold: float = 0.05,
+    ransac_iterations: int = 2000,
+) -> DetectedPlane:
+    """Fit a wall plane from user-picked corners against the actual point cloud.
+
+    1. Build a plane from the user's corners (least-squares).
+    2. Collect all cloud points within *search_radius* of the AABB defined
+       by the corners.
+    3. Among those candidates, run RANSAC seeded toward the user plane to
+       find the best-fit wall surface.
+    4. Return a :class:`DetectedPlane` snapped to the real geometry.
+
+    This is the "click 4 corners" feature: the user roughly marks where
+    a missing wall is, and the algorithm refines it against the scan.
+    """
+    corners_arr = np.array(corners, dtype=np.float64)  # (K, 3)
+
+    if len(corners_arr) < 3:
+        raise ValueError("Need at least 3 corner points to define a plane")
+
+    # ── 1. derive initial plane from the corners ──────────────────────
+    centroid = corners_arr.mean(axis=0)
+    centered = corners_arr - centroid
+    _, _, vt = np.linalg.svd(centered)
+    init_normal = vt[-1]  # smallest singular value = normal direction
+    init_normal /= np.linalg.norm(init_normal)
+    init_offset = float(np.dot(init_normal, centroid))
+
+    # ── 2. gather candidate points near the user region ──────────────
+    # expand AABB by search_radius in every direction
+    rgn_min = corners_arr.min(axis=0) - search_radius
+    rgn_max = corners_arr.max(axis=0) + search_radius
+
+    in_box = np.all((points >= rgn_min) & (points <= rgn_max), axis=1)
+    candidates = points[in_box]
+
+    if len(candidates) < 10:
+        # Not enough nearby points — just use the user corners directly
+        logger.warning("Only %d candidate points near corners — using raw corners", len(candidates))
+        bounds = BBox(
+            min=Vec3(x=float(corners_arr[:, 0].min()), y=float(corners_arr[:, 1].min()), z=float(corners_arr[:, 2].min())),
+            max=Vec3(x=float(corners_arr[:, 0].max()), y=float(corners_arr[:, 1].max()), z=float(corners_arr[:, 2].max())),
+        )
+        return DetectedPlane(
+            kind=PlaneKind.WALL,
+            normal=Vec3(x=float(init_normal[0]), y=float(init_normal[1]), z=float(init_normal[2])),
+            offset=init_offset,
+            inlier_count=len(corners_arr),
+            bounds=bounds,
+        )
+
+    logger.info(
+        "Manual wall: %d candidate points in region (%.1f × %.1f × %.1f m)",
+        len(candidates),
+        *(rgn_max - rgn_min),
+    )
+
+    # ── 3. pre-filter: keep only points close to the initial plane ───
+    dists_to_plane = np.abs(candidates @ init_normal - init_offset)
+    near_plane = dists_to_plane < search_radius
+    candidates = candidates[near_plane]
+
+    if len(candidates) < 10:
+        logger.warning("Too few points near plane — using raw corners")
+        bounds = BBox(
+            min=Vec3(x=float(corners_arr[:, 0].min()), y=float(corners_arr[:, 1].min()), z=float(corners_arr[:, 2].min())),
+            max=Vec3(x=float(corners_arr[:, 0].max()), y=float(corners_arr[:, 1].max()), z=float(corners_arr[:, 2].max())),
+        )
+        return DetectedPlane(
+            kind=PlaneKind.WALL,
+            normal=Vec3(x=float(init_normal[0]), y=float(init_normal[1]), z=float(init_normal[2])),
+            offset=init_offset,
+            inlier_count=len(corners_arr),
+            bounds=bounds,
+        )
+
+    # ── 4. RANSAC on candidates ──────────────────────────────────────
+    result = _fit_plane_ransac(
+        candidates,
+        max_iterations=ransac_iterations,
+        distance_threshold=distance_threshold,
+        min_inliers=max(10, len(candidates) // 10),
+    )
+
+    if result is not None:
+        normal, offset, inlier_mask = result
+        inlier_pts = candidates[inlier_mask]
+        logger.info("Manual wall refined: %d inliers from %d candidates", int(inlier_mask.sum()), len(candidates))
+    else:
+        # fall back to initial plane
+        logger.info("RANSAC found no better plane — using corner-derived plane")
+        normal = init_normal
+        offset = init_offset
+        inlier_pts = candidates[np.abs(candidates @ init_normal - init_offset) < distance_threshold]
+        if len(inlier_pts) < 3:
+            inlier_pts = corners_arr
+
+    # ── 5. compute bounds from inliers ───────────────────────────────
+    if len(inlier_pts) < 20:
+        mins = inlier_pts.min(axis=0)
+        maxs = inlier_pts.max(axis=0)
+    else:
+        mins = np.percentile(inlier_pts, 2, axis=0)
+        maxs = np.percentile(inlier_pts, 98, axis=0)
+
+    bounds = BBox(
+        min=Vec3(x=float(mins[0]), y=float(mins[1]), z=float(mins[2])),
+        max=Vec3(x=float(maxs[0]), y=float(maxs[1]), z=float(maxs[2])),
+    )
+
+    return DetectedPlane(
+        kind=PlaneKind.WALL,
+        normal=Vec3(x=float(normal[0]), y=float(normal[1]), z=float(normal[2])),
+        offset=float(offset),
+        inlier_count=len(inlier_pts),
+        bounds=bounds,
+    )
+
+
 # ── public API ───────────────────────────────────────────────────────
 
 def detect_planes(

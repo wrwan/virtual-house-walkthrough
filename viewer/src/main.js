@@ -78,6 +78,7 @@ const PLANE_COLORS = {
   floor: 0x4caf50,
   ceiling: 0x2196f3,
   wall: 0xff9800,
+  manual: 0xe91e63,
   unknown: 0x999999,
 };
 
@@ -305,3 +306,196 @@ document.getElementById('btn-new').addEventListener('click', () => {
   document.getElementById('hud').style.display = 'none';
   document.getElementById('controls').style.display = 'none';
 });
+
+// ── Manual wall corner picking ──────────────────────────────────────
+const manualWallBtn = document.getElementById('btn-add-wall');
+const manualWallStatus = document.getElementById('manual-wall-status');
+let manualMode = false;
+let pickedCorners = [];       // world-space Vec3[]
+let cornerMarkers = [];       // Three.js meshes
+let edgeLines = [];            // Three.js line segments
+const cornerGroup = new THREE.Group();
+cornerGroup.name = 'cornerMarkers';
+scene.add(cornerGroup);
+
+manualWallBtn.addEventListener('click', () => {
+  if (manualMode) {
+    exitManualMode();
+  } else {
+    enterManualMode();
+  }
+});
+
+function enterManualMode() {
+  manualMode = true;
+  pickedCorners = [];
+  clearCornerVisuals();
+  manualWallBtn.classList.add('active-mode');
+  manualWallBtn.textContent = 'Cancel';
+  manualWallStatus.textContent = 'Click 4 points on the wall (0/4)';
+  controls.enabled = true;  // orbit stays on; we pick on click events
+  renderer.domElement.addEventListener('pointerdown', onManualPointerDown);
+}
+
+function exitManualMode() {
+  manualMode = false;
+  pickedCorners = [];
+  clearCornerVisuals();
+  manualWallBtn.classList.remove('active-mode');
+  manualWallBtn.textContent = '+ Add Wall';
+  manualWallStatus.textContent = '';
+  renderer.domElement.removeEventListener('pointerdown', onManualPointerDown);
+}
+
+function clearCornerVisuals() {
+  while (cornerGroup.children.length) cornerGroup.remove(cornerGroup.children[0]);
+  cornerMarkers = [];
+  edgeLines = [];
+}
+
+// Raycaster against the point cloud
+const raycaster = new THREE.Raycaster();
+raycaster.params.Points.threshold = 0.05;  // hit tolerance in world units
+const mouse = new THREE.Vector2();
+
+let pointerDownPos = null; // track drag vs click
+
+function onManualPointerDown(e) {
+  if (!manualMode) return;
+  // record start position to distinguish drag from click
+  pointerDownPos = { x: e.clientX, y: e.clientY };
+  renderer.domElement.addEventListener('pointerup', onManualPointerUp, { once: true });
+}
+
+function onManualPointerUp(e) {
+  if (!manualMode || !pointerDownPos) return;
+  // if user dragged more than 5px, treat as orbit, not pick
+  const dx = e.clientX - pointerDownPos.x;
+  const dy = e.clientY - pointerDownPos.y;
+  if (Math.sqrt(dx * dx + dy * dy) > 5) return;
+  if (e.button !== 0) return;  // left click only
+
+  mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+
+  raycaster.setFromCamera(mouse, camera);
+
+  // Intersect against all Points objects in the rotated pointCloudGroup
+  const intersections = raycaster.intersectObjects(pointCloudGroup.children, true);
+  if (intersections.length === 0) {
+    console.log('[MANUAL] No intersection found');
+    return;
+  }
+
+  // The intersection point is in world space already
+  const hit = intersections[0].point.clone();
+  console.log(`[MANUAL] Picked corner ${pickedCorners.length + 1}: (${hit.x.toFixed(3)}, ${hit.y.toFixed(3)}, ${hit.z.toFixed(3)})`);
+
+  pickedCorners.push(hit);
+  addCornerMarker(hit);
+
+  if (pickedCorners.length > 1) {
+    addEdgeLine(pickedCorners[pickedCorners.length - 2], hit);
+  }
+
+  manualWallStatus.textContent = `Click 4 points on the wall (${pickedCorners.length}/4)`;
+
+  if (pickedCorners.length >= 4) {
+    // Close the loop visually
+    addEdgeLine(pickedCorners[3], pickedCorners[0]);
+    manualWallStatus.textContent = 'Refining wall against point cloud…';
+    submitManualWall();
+  }
+}
+
+function addCornerMarker(pos) {
+  const geo = new THREE.SphereGeometry(0.04, 12, 12);
+  const mat = new THREE.MeshBasicMaterial({ color: 0xe91e63 });
+  const sphere = new THREE.Mesh(geo, mat);
+  sphere.position.copy(pos);
+  cornerGroup.add(sphere);
+  cornerMarkers.push(sphere);
+}
+
+function addEdgeLine(a, b) {
+  const geo = new THREE.BufferGeometry().setFromPoints([a, b]);
+  const mat = new THREE.LineBasicMaterial({ color: 0xe91e63, linewidth: 2 });
+  const line = new THREE.Line(geo, mat);
+  cornerGroup.add(line);
+  edgeLines.push(line);
+}
+
+async function submitManualWall() {
+  // Convert picked world-space corners back to the point-cloud's local
+  // coordinate system (undo the -90° X rotation on pointCloudGroup).
+  // pointCloudGroup.rotation.x = -PI/2  →  inverse is +PI/2
+  const invMatrix = new THREE.Matrix4().copy(pointCloudGroup.matrixWorld).invert();
+  const corners = pickedCorners.map(p => {
+    const local = p.clone().applyMatrix4(invMatrix);
+    return [local.x, local.y, local.z];
+  });
+
+  console.log('[MANUAL] Submitting corners to /api/manual-wall:', corners);
+
+  try {
+    const res = await fetch(`${API}/manual-wall`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ corners }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || res.statusText);
+    }
+
+    const plane = await res.json();
+    console.log('[MANUAL] Wall refined:', plane);
+
+    // Render the new wall
+    addPlaneToScene(plane, true);
+
+    manualWallStatus.textContent = `Wall added! (${plane.inlier_count} inlier points)`;
+
+    // Update HUD wall count
+    const currentCount = parseInt(document.getElementById('hud-walls').textContent) || 0;
+    document.getElementById('hud-walls').textContent = currentCount + 1;
+    const planesCount = parseInt(document.getElementById('hud-planes').textContent) || 0;
+    document.getElementById('hud-planes').textContent = planesCount + 1;
+  } catch (err) {
+    console.error('[MANUAL] Error:', err);
+    manualWallStatus.textContent = `\u274c ${err.message}`;
+  }
+
+  // Clean up corner markers after a delay so user can see them
+  setTimeout(() => {
+    clearCornerVisuals();
+    exitManualMode();
+  }, 1500);
+}
+
+/** Add a single plane object to the 3D scene. */
+function addPlaneToScene(plane, isManual = false) {
+  if (!plane.bounds) return;
+  const b = plane.bounds;
+  const sx = b.max.x - b.min.x;
+  const sy = b.max.y - b.min.y;
+  const sz = b.max.z - b.min.z;
+  const cx = (b.max.x + b.min.x) / 2;
+  const cy = (b.max.y + b.min.y) / 2;
+  const cz = (b.max.z + b.min.z) / 2;
+
+  const color = isManual ? PLANE_COLORS.manual : (PLANE_COLORS[plane.kind] || PLANE_COLORS.unknown);
+
+  const boxGeo = new THREE.BoxGeometry(Math.max(sx, 0.01), Math.max(sy, 0.01), Math.max(sz, 0.01));
+  const edges = new THREE.EdgesGeometry(boxGeo);
+  const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color, linewidth: 2 }));
+  line.position.set(cx, cy, cz);
+
+  const fillMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.15, side: THREE.DoubleSide });
+  const fillMesh = new THREE.Mesh(boxGeo.clone(), fillMat);
+  fillMesh.position.set(cx, cy, cz);
+
+  wallGroup.add(line);
+  wallGroup.add(fillMesh);
+}
