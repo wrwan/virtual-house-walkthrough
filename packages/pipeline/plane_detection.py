@@ -115,9 +115,19 @@ def _relabel_horizontal_planes(planes: list[DetectedPlane]) -> None:
 
 
 def _inlier_bounds(points: np.ndarray, mask: np.ndarray) -> BBox:
+    """Compute a robust AABB using percentile trimming.
+
+    The 2nd / 98th percentile avoids a single outlier point stretching
+    the bounding box far beyond the real surface.
+    """
     inlier_pts = points[mask]
-    mins = inlier_pts.min(axis=0)
-    maxs = inlier_pts.max(axis=0)
+    if len(inlier_pts) < 20:
+        # Too few points for percentile — fall back to exact bounds
+        mins = inlier_pts.min(axis=0)
+        maxs = inlier_pts.max(axis=0)
+    else:
+        mins = np.percentile(inlier_pts, 2, axis=0)
+        maxs = np.percentile(inlier_pts, 98, axis=0)
     return BBox(
         min=Vec3(x=float(mins[0]), y=float(mins[1]), z=float(mins[2])),
         max=Vec3(x=float(maxs[0]), y=float(maxs[1]), z=float(maxs[2])),
@@ -176,12 +186,127 @@ def _cluster_inliers(
     return clusters
 
 
+# ── coplanar plane fusing ────────────────────────────────────────────
+
+def _should_fuse(
+    a: DetectedPlane,
+    b: DetectedPlane,
+    normal_threshold: float,
+    offset_threshold: float,
+    spatial_gap: float,
+) -> bool:
+    """Return True if planes *a* and *b* are nearly coplanar and spatially close."""
+    na = np.array([a.normal.x, a.normal.y, a.normal.z])
+    nb = np.array([b.normal.x, b.normal.y, b.normal.z])
+
+    # Normals must be nearly parallel
+    dot = np.dot(na, nb)
+    if abs(dot) < normal_threshold:
+        return False
+
+    # Perpendicular distance between the two parallel planes.
+    # When normals point in opposite directions the offset signs flip.
+    if dot < 0:
+        plane_dist = abs(a.offset + b.offset)
+    else:
+        plane_dist = abs(a.offset - b.offset)
+    if plane_dist > offset_threshold:
+        return False
+
+    # Spatial proximity – bounding boxes must overlap or be within *spatial_gap*
+    if a.bounds and b.bounds:
+        gap_x = max(0, max(a.bounds.min.x, b.bounds.min.x) - min(a.bounds.max.x, b.bounds.max.x))
+        gap_y = max(0, max(a.bounds.min.y, b.bounds.min.y) - min(a.bounds.max.y, b.bounds.max.y))
+        gap_z = max(0, max(a.bounds.min.z, b.bounds.min.z) - min(a.bounds.max.z, b.bounds.max.z))
+        if max(gap_x, gap_y, gap_z) > spatial_gap:
+            return False
+
+    return True
+
+
+def _merge_planes(a: DetectedPlane, b: DetectedPlane) -> DetectedPlane:
+    """Merge two coplanar planes, keeping the larger one's orientation."""
+    primary, secondary = (a, b) if a.inlier_count >= b.inlier_count else (b, a)
+
+    merged_bounds: BBox | None = None
+    if primary.bounds and secondary.bounds:
+        merged_bounds = BBox(
+            min=Vec3(
+                x=min(primary.bounds.min.x, secondary.bounds.min.x),
+                y=min(primary.bounds.min.y, secondary.bounds.min.y),
+                z=min(primary.bounds.min.z, secondary.bounds.min.z),
+            ),
+            max=Vec3(
+                x=max(primary.bounds.max.x, secondary.bounds.max.x),
+                y=max(primary.bounds.max.y, secondary.bounds.max.y),
+                z=max(primary.bounds.max.z, secondary.bounds.max.z),
+            ),
+        )
+    else:
+        merged_bounds = primary.bounds or secondary.bounds
+
+    return DetectedPlane(
+        kind=primary.kind,
+        normal=primary.normal,
+        offset=primary.offset,
+        inlier_count=primary.inlier_count + secondary.inlier_count,
+        bounds=merged_bounds,
+    )
+
+
+def _fuse_coplanar_planes(
+    planes: list[DetectedPlane],
+    *,
+    normal_threshold: float = 0.95,
+    offset_threshold: float = 0.15,
+    spatial_gap: float = 0.5,
+) -> list[DetectedPlane]:
+    """Merge nearly-coplanar, spatially-overlapping planes into single walls.
+
+    Two planes are fused when:
+
+    * their normals are nearly parallel (dot product > *normal_threshold*),
+    * the perpendicular distance between them is < *offset_threshold* metres,
+    * their bounding boxes overlap or are within *spatial_gap* metres.
+
+    The pass repeats until no more merges occur (transitive closure).
+    """
+    if len(planes) <= 1:
+        return planes
+
+    fused = list(planes)
+    changed = True
+    while changed:
+        changed = False
+        i = 0
+        while i < len(fused):
+            j = i + 1
+            while j < len(fused):
+                if _should_fuse(fused[i], fused[j], normal_threshold, offset_threshold, spatial_gap):
+                    logger.debug(
+                        "Fusing plane %d (%d pts) ← plane %d (%d pts)",
+                        i, fused[i].inlier_count, j, fused[j].inlier_count,
+                    )
+                    fused[i] = _merge_planes(fused[i], fused[j])
+                    fused.pop(j)
+                    changed = True
+                else:
+                    j += 1
+            i += 1
+
+    if len(planes) != len(fused):
+        logger.info(
+            "  \U0001f517 Fused %d wall segments down to %d", len(planes), len(fused),
+        )
+    return fused
+
+
 # ── public API ───────────────────────────────────────────────────────
 
 def detect_planes(
     points: np.ndarray,
     *,
-    max_planes: int = 10,
+    max_planes: int = 50,
     max_iterations: int = 1000,
     distance_threshold: float = 0.02,
     min_inlier_ratio: float = 0.02,
@@ -266,4 +391,8 @@ def detect_planes(
 
     # Filter to walls only
     planes = [p for p in planes if p.kind == PlaneKind.WALL]
+
+    # Fuse nearly-coplanar overlapping wall segments into single walls
+    planes = _fuse_coplanar_planes(planes)
+
     return planes

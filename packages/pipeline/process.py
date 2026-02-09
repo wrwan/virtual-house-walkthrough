@@ -18,7 +18,7 @@ def process_scan(
     input_path: str | Path,
     *,
     voxel_size: float = 0.05,
-    max_planes: int = 10,
+    max_planes: int = 50,
     ransac_iterations: int = 1000,
     distance_threshold: float = 0.02,
     seed: int | None = None,
