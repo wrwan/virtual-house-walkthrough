@@ -522,3 +522,220 @@ def detect_planes(
     planes = _fuse_coplanar_planes(planes)
 
     return planes
+
+
+# ── wall intersection trimming ───────────────────────────────────────
+
+def trim_wall_at_intersection(
+    wall: DetectedPlane,
+    clipper: DetectedPlane,
+) -> DetectedPlane:
+    """Clip *wall*'s bounding box so it doesn't protrude past *clipper*.
+
+    The clipper defines a half-space via its plane equation (n · x = d).
+    We figure out which side of the clipper holds the bulk of the wall,
+    then trim the wall's AABB to that side.
+
+    This handles the common case where two walls meet at a corner and one
+    of them overshoots past the other.
+    """
+    if wall.bounds is None or clipper.bounds is None:
+        return wall  # nothing to trim
+
+    cn = np.array([clipper.normal.x, clipper.normal.y, clipper.normal.z])
+    cd = clipper.offset
+    cn_norm = np.linalg.norm(cn)
+    if cn_norm < 1e-12:
+        return wall
+    cn = cn / cn_norm
+    cd = cd / cn_norm
+
+    # Wall AABB corners
+    wb = wall.bounds
+    wmin = np.array([wb.min.x, wb.min.y, wb.min.z])
+    wmax = np.array([wb.max.x, wb.max.y, wb.max.z])
+    wcenter = (wmin + wmax) / 2.0
+
+    # Which side of the clipper plane is the wall centre on?
+    center_side = np.dot(cn, wcenter) - cd  # positive = same side as normal
+
+    # Find which axis of the wall AABB the clipper normal is most aligned with.
+    # We'll clamp along that axis.
+    abs_cn = np.abs(cn)
+    clip_axis = int(np.argmax(abs_cn))
+
+    # The intersection coordinate along clip_axis: solve cn · p = cd
+    # for p[clip_axis], assuming p is on the wall centre for the other axes.
+    if abs(cn[clip_axis]) < 1e-9:
+        return wall  # clipper is parallel to this axis – no meaningful clip
+
+    other_sum = sum(cn[j] * wcenter[j] for j in range(3) if j != clip_axis)
+    intersection_val = (cd - other_sum) / cn[clip_axis]
+
+    # Clamp the wall's AABB: keep the side that contains the centre
+    new_min = list(wmin)
+    new_max = list(wmax)
+
+    if center_side >= 0:
+        # centre is on the + side of clipper → clamp minimum
+        new_min[clip_axis] = max(new_min[clip_axis], intersection_val)
+    else:
+        # centre is on the − side → clamp maximum
+        new_max[clip_axis] = min(new_max[clip_axis], intersection_val)
+
+    # Safety: don't let min exceed max
+    for k in range(3):
+        if new_min[k] > new_max[k]:
+            new_min[k], new_max[k] = new_max[k], new_min[k]
+
+    new_bounds = BBox(
+        min=Vec3(x=float(new_min[0]), y=float(new_min[1]), z=float(new_min[2])),
+        max=Vec3(x=float(new_max[0]), y=float(new_max[1]), z=float(new_max[2])),
+    )
+
+    return DetectedPlane(
+        kind=wall.kind,
+        normal=wall.normal,
+        offset=wall.offset,
+        inlier_count=wall.inlier_count,
+        bounds=new_bounds,
+    )
+
+
+# ── wall normalization / snapping ────────────────────────────────────
+
+_SNAP_ANGLES_DEG = [0, 45, 90, 135, 180]
+
+
+def _snap_angle(angle_deg: float) -> float:
+    """Snap an angle (degrees) to the nearest canonical angle."""
+    best = min(_SNAP_ANGLES_DEG, key=lambda a: abs(angle_deg - a))
+    return best
+
+
+def normalize_walls(
+    planes: list[DetectedPlane],
+    *,
+    thickness_percentile: float = 50.0,
+    height_percentile: float = 75.0,
+) -> list[DetectedPlane]:
+    """Clean up wall geometry: snap angles, unify thickness, align heights.
+
+    Steps:
+
+    1. **Compute dominant directions** – find the principal wall normal and
+       snap every wall normal to the nearest 45° increment relative to it.
+    2. **Normalise thickness** – compute the median wall thickness (the
+       thin AABB axis) and set all walls to that value, centred on their
+       current plane.
+    3. **Align heights** – use a representative wall height and apply it
+       uniformly, snapping the base to the lowest detected base.
+    """
+    if len(planes) < 2:
+        return planes
+
+    # Gather normals projected onto XY (horizontal plane)
+    normals_2d = []
+    for p in planes:
+        n = np.array([p.normal.x, p.normal.y, p.normal.z])
+        n2d = n[:2]
+        length = np.linalg.norm(n2d)
+        if length > 1e-6:
+            normals_2d.append(n2d / length)
+        else:
+            normals_2d.append(np.array([1.0, 0.0]))
+
+    # Dominant direction: the normal with the most inliers
+    dominant_idx = max(range(len(planes)), key=lambda i: planes[i].inlier_count)
+    ref_angle = float(np.degrees(np.arctan2(normals_2d[dominant_idx][1], normals_2d[dominant_idx][0])))
+
+    # --- collect per-wall metrics ---
+    thicknesses = []
+    heights = []
+    bases = []
+    for p in planes:
+        if p.bounds is None:
+            continue
+        b = p.bounds
+        dims = [b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z]
+        # thickness = thinnest dimension, height = z-extent
+        thicknesses.append(min(dims[0], dims[1]))  # thin axis in XY
+        heights.append(dims[2])
+        bases.append(b.min.z)
+
+    target_thickness = float(np.percentile(thicknesses, thickness_percentile)) if thicknesses else 0.1
+    target_height = float(np.percentile(heights, height_percentile)) if heights else 2.5
+    common_base = float(np.percentile(bases, 25)) if bases else 0.0  # lower quartile = floor level
+
+    # Ensure minimums
+    target_thickness = max(target_thickness, 0.04)
+    target_height = max(target_height, 0.5)
+
+    logger.info(
+        "Normalize: thickness=%.3fm, height=%.2fm, base=%.2fm, ref_angle=%.1f°",
+        target_thickness, target_height, common_base, ref_angle,
+    )
+
+    result: list[DetectedPlane] = []
+    for i, plane in enumerate(planes):
+        if plane.bounds is None:
+            result.append(plane)
+            continue
+
+        b = plane.bounds
+        n = np.array([plane.normal.x, plane.normal.y, plane.normal.z])
+
+        # ── 1. snap normal to nearest 45° ─────────────────────
+        n2d = normals_2d[i]
+        raw_angle = float(np.degrees(np.arctan2(n2d[1], n2d[0])))
+        # relative to dominant, snap, then back to absolute
+        relative = (raw_angle - ref_angle) % 180.0
+        snapped_rel = _snap_angle(relative)
+        snapped_abs = ref_angle + snapped_rel
+        snapped_rad = np.radians(snapped_abs)
+        new_nx = float(np.cos(snapped_rad))
+        new_ny = float(np.sin(snapped_rad))
+        new_nz = float(n[2])  # keep vertical component
+        nnorm = np.sqrt(new_nx**2 + new_ny**2 + new_nz**2)
+        if nnorm > 1e-9:
+            new_nx /= nnorm; new_ny /= nnorm; new_nz /= nnorm
+
+        new_normal = Vec3(x=new_nx, y=new_ny, z=new_nz)
+
+        # ── 2. recompute offset so plane still passes through centre ──
+        cx = (b.min.x + b.max.x) / 2
+        cy = (b.min.y + b.max.y) / 2
+        cz = (b.min.z + b.max.z) / 2
+        new_offset = new_nx * cx + new_ny * cy + new_nz * cz
+
+        # ── 3. normalise thickness ────────────────────────────
+        dims = np.array([b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z])
+        thin_xy = int(np.argmin(dims[:2]))  # 0 or 1
+        center = np.array([cx, cy, cz])
+
+        new_min = np.array([b.min.x, b.min.y, b.min.z])
+        new_max = np.array([b.max.x, b.max.y, b.max.z])
+
+        # Set thin axis to target_thickness, centred
+        new_min[thin_xy] = center[thin_xy] - target_thickness / 2
+        new_max[thin_xy] = center[thin_xy] + target_thickness / 2
+
+        # ── 4. normalise height ───────────────────────────────
+        new_min[2] = common_base
+        new_max[2] = common_base + target_height
+
+        new_bounds = BBox(
+            min=Vec3(x=float(new_min[0]), y=float(new_min[1]), z=float(new_min[2])),
+            max=Vec3(x=float(new_max[0]), y=float(new_max[1]), z=float(new_max[2])),
+        )
+
+        result.append(DetectedPlane(
+            kind=plane.kind,
+            normal=new_normal,
+            offset=float(new_offset),
+            inlier_count=plane.inlier_count,
+            bounds=new_bounds,
+        ))
+
+    logger.info("  ✅ Normalized %d walls", len(result))
+    return result

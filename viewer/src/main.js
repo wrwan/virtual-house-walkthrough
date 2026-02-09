@@ -73,6 +73,10 @@ const wallGroup = new THREE.Group(); wallGroup.name = 'walls';
 // planeGroup.add(wallGroup, floorGroup, ceilingGroup);
 planeGroup.add(wallGroup);
 
+// Track wall objects for selection/deletion
+// Each entry: { index, lineObj, fillObj, plane }
+let wallObjects = [];
+
 // ── Colours ─────────────────────────────────────────────────────────
 const PLANE_COLORS = {
   floor: 0x4caf50,
@@ -217,9 +221,11 @@ async function loadModel(uploadInfo) {
 
   let wallCount = 0;
   // let floorCount = 0, ceilingCount = 0;
+  wallObjects = [];
 
   console.log('[MODEL] Building plane visualizations (walls only)...');
-  for (const plane of model.planes) {
+  for (let planeIdx = 0; planeIdx < model.planes.length; planeIdx++) {
+    const plane = model.planes[planeIdx];
     // Skip non-wall planes
     if (plane.kind !== 'wall') {
       console.log(`[MODEL] Skipping ${plane.kind} plane`);
@@ -248,18 +254,19 @@ async function loadModel(uploadInfo) {
     const fillMesh = new THREE.Mesh(boxGeo.clone(), fillMat);
     fillMesh.position.set(cx, cy, cz);
 
+    // Tag meshes with wall index for raycasting
+    line.userData.wallIndex = planeIdx;
+    fillMesh.userData.wallIndex = planeIdx;
+
     const group = plane.kind === 'wall' ? wallGroup
                 : planeGroup;
-                // : plane.kind === 'floor' ? floorGroup
-                // : plane.kind === 'ceiling' ? ceilingGroup
-                // : planeGroup;
 
     group.add(line);
     group.add(fillMesh);
 
+    wallObjects.push({ index: planeIdx, lineObj: line, fillObj: fillMesh, plane });
+
     if (plane.kind === 'wall') wallCount++;
-    // else if (plane.kind === 'floor') floorCount++;
-    // else if (plane.kind === 'ceiling') ceilingCount++;
   }
 
   console.log(`[MODEL] Created ${wallCount} walls (floor/ceiling disabled)`);
@@ -452,8 +459,9 @@ async function submitManualWall() {
     const plane = await res.json();
     console.log('[MANUAL] Wall refined:', plane);
 
-    // Render the new wall
-    addPlaneToScene(plane, true);
+    // Render the new wall — server index is planes.length - 1
+    const serverIdx = parseInt(document.getElementById('hud-planes').textContent) || 0;
+    addPlaneToScene(plane, true, serverIdx);
 
     manualWallStatus.textContent = `Wall added! (${plane.inlier_count} inlier points)`;
 
@@ -475,7 +483,7 @@ async function submitManualWall() {
 }
 
 /** Add a single plane object to the 3D scene. */
-function addPlaneToScene(plane, isManual = false) {
+function addPlaneToScene(plane, isManual = false, serverIndex = -1) {
   if (!plane.bounds) return;
   const b = plane.bounds;
   const sx = b.max.x - b.min.x;
@@ -496,6 +504,264 @@ function addPlaneToScene(plane, isManual = false) {
   const fillMesh = new THREE.Mesh(boxGeo.clone(), fillMat);
   fillMesh.position.set(cx, cy, cz);
 
+  // Tag with server index
+  const idx = serverIndex >= 0 ? serverIndex : wallObjects.length;
+  line.userData.wallIndex = idx;
+  fillMesh.userData.wallIndex = idx;
+
   wallGroup.add(line);
   wallGroup.add(fillMesh);
+
+  wallObjects.push({ index: idx, lineObj: line, fillObj: fillMesh, plane });
 }
+
+// ── Wall selection / deletion / trim ────────────────────────────────
+const actionStatus = document.getElementById('action-status');
+let selectedWallEntry = null;      // current wallObjects entry or null
+let trimMode = false;
+let trimFirstWall = null;         // wallObjects entry of the first pick
+
+/** Highlight a wall red (selected) or reset to orange. */
+function setWallHighlight(entry, highlighted) {
+  if (!entry) return;
+  const color = highlighted ? 0xff1744 : (PLANE_COLORS.wall);
+  entry.lineObj.material.color.setHex(color);
+  entry.fillObj.material.color.setHex(color);
+  entry.fillObj.material.opacity = highlighted ? 0.3 : 0.12;
+}
+
+/** Find the wallObjects entry for a given wallIndex. */
+function findWallEntry(wallIndex) {
+  return wallObjects.find(w => w.index === wallIndex) || null;
+}
+
+/** Raycast against wall fill meshes (not point cloud). */
+function raycastWalls(event) {
+  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+
+  const fillMeshes = wallObjects.map(w => w.fillObj);
+  const hits = raycaster.intersectObjects(fillMeshes, false);
+  if (hits.length === 0) return null;
+  const wallIdx = hits[0].object.userData.wallIndex;
+  return findWallEntry(wallIdx);
+}
+
+// Click on canvas to select/deselect walls (when NOT in manual-add or trim mode)
+renderer.domElement.addEventListener('dblclick', (e) => {
+  if (manualMode || trimMode) return;
+
+  const entry = raycastWalls(e);
+
+  // Deselect previous
+  if (selectedWallEntry) {
+    setWallHighlight(selectedWallEntry, false);
+  }
+
+  if (entry && entry !== selectedWallEntry) {
+    selectedWallEntry = entry;
+    setWallHighlight(entry, true);
+    actionStatus.textContent = `Wall ${entry.index} selected — press Delete or click Trim`;
+    actionStatus.style.color = '#ff1744';
+  } else {
+    selectedWallEntry = null;
+    actionStatus.textContent = '';
+    actionStatus.style.color = '#aaa';
+  }
+});
+
+// Delete key removes selected wall
+window.addEventListener('keydown', async (e) => {
+  if (e.key === 'Delete' && selectedWallEntry && !manualMode && !trimMode) {
+    const idx = selectedWallEntry.index;
+    actionStatus.textContent = `Deleting wall ${idx}…`;
+
+    try {
+      const res = await fetch(`${API}/wall/${idx}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || res.statusText);
+      }
+
+      // Remove from scene
+      wallGroup.remove(selectedWallEntry.lineObj);
+      wallGroup.remove(selectedWallEntry.fillObj);
+      selectedWallEntry.lineObj.geometry.dispose();
+      selectedWallEntry.fillObj.geometry.dispose();
+
+      wallObjects = wallObjects.filter(w => w !== selectedWallEntry);
+
+      // Re-index: entries after the deleted one shift down
+      for (const w of wallObjects) {
+        if (w.index > idx) {
+          w.index--;
+          w.lineObj.userData.wallIndex--;
+          w.fillObj.userData.wallIndex--;
+        }
+      }
+
+      selectedWallEntry = null;
+      actionStatus.textContent = `Wall ${idx} deleted`;
+      actionStatus.style.color = '#4caf50';
+
+      // Update HUD
+      document.getElementById('hud-walls').textContent = wallObjects.length;
+      document.getElementById('hud-planes').textContent = wallObjects.length;
+
+      setTimeout(() => { actionStatus.textContent = ''; actionStatus.style.color = '#aaa'; }, 2000);
+    } catch (err) {
+      console.error('[DELETE]', err);
+      actionStatus.textContent = `Error: ${err.message}`;
+      actionStatus.style.color = '#ff1744';
+    }
+  }
+});
+
+// ── Trim intersection mode ──────────────────────────────────────────
+const trimBtn = document.getElementById('btn-trim-wall');
+
+trimBtn.addEventListener('click', () => {
+  if (trimMode) {
+    exitTrimMode();
+  } else {
+    enterTrimMode();
+  }
+});
+
+function enterTrimMode() {
+  if (manualMode) return;
+  trimMode = true;
+  trimFirstWall = null;
+  trimBtn.classList.add('active-mode');
+  trimBtn.textContent = 'Cancel Trim';
+  actionStatus.textContent = 'Click the wall to trim (1/2)';
+  actionStatus.style.color = '#e65100';
+  renderer.domElement.addEventListener('pointerdown', onTrimPointerDown);
+}
+
+function exitTrimMode() {
+  trimMode = false;
+  if (trimFirstWall) { setWallHighlight(trimFirstWall, false); trimFirstWall = null; }
+  if (selectedWallEntry) { setWallHighlight(selectedWallEntry, false); selectedWallEntry = null; }
+  trimBtn.classList.remove('active-mode');
+  trimBtn.textContent = 'Trim Intersection';
+  actionStatus.textContent = '';
+  actionStatus.style.color = '#aaa';
+  renderer.domElement.removeEventListener('pointerdown', onTrimPointerDown);
+}
+
+let trimPointerDown = null;
+
+function onTrimPointerDown(e) {
+  if (!trimMode) return;
+  trimPointerDown = { x: e.clientX, y: e.clientY };
+  renderer.domElement.addEventListener('pointerup', onTrimPointerUp, { once: true });
+}
+
+function onTrimPointerUp(e) {
+  if (!trimMode || !trimPointerDown) return;
+  const dx = e.clientX - trimPointerDown.x;
+  const dy = e.clientY - trimPointerDown.y;
+  if (Math.sqrt(dx * dx + dy * dy) > 5) return;
+  if (e.button !== 0) return;
+
+  const entry = raycastWalls(e);
+  if (!entry) return;
+
+  if (!trimFirstWall) {
+    trimFirstWall = entry;
+    setWallHighlight(entry, true);
+    actionStatus.textContent = `Wall ${entry.index} selected — now click the clipper wall (2/2)`;
+  } else if (entry.index !== trimFirstWall.index) {
+    // We have both walls — submit trim
+    actionStatus.textContent = 'Trimming…';
+    submitTrim(trimFirstWall.index, entry.index);
+  }
+}
+
+async function submitTrim(wallIndex, clipperIndex) {
+  try {
+    const res = await fetch(`${API}/trim-wall`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ wall_index: wallIndex, clipper_index: clipperIndex }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || res.statusText);
+    }
+
+    const trimmedPlane = await res.json();
+    console.log('[TRIM] Wall trimmed:', trimmedPlane);
+
+    // Update the visual: remove old, add new
+    const entry = wallObjects.find(w => w.index === wallIndex);
+    if (entry) {
+      wallGroup.remove(entry.lineObj);
+      wallGroup.remove(entry.fillObj);
+      entry.lineObj.geometry.dispose();
+      entry.fillObj.geometry.dispose();
+      wallObjects = wallObjects.filter(w => w !== entry);
+    }
+
+    addPlaneToScene(trimmedPlane, false, wallIndex);
+    actionStatus.textContent = `Wall ${wallIndex} trimmed at wall ${clipperIndex}`;
+    actionStatus.style.color = '#4caf50';
+  } catch (err) {
+    console.error('[TRIM]', err);
+    actionStatus.textContent = `Error: ${err.message}`;
+    actionStatus.style.color = '#ff1744';
+  }
+
+  setTimeout(() => exitTrimMode(), 1500);
+}
+
+// ── Normalize walls ─────────────────────────────────────────────────
+const normalizeBtn = document.getElementById('btn-normalize');
+
+normalizeBtn.addEventListener('click', async () => {
+  if (manualMode || trimMode) return;
+
+  normalizeBtn.disabled = true;
+  actionStatus.textContent = 'Normalizing walls…';
+  actionStatus.style.color = '#6c63ff';
+
+  try {
+    const res = await fetch(`${API}/normalize-walls`, { method: 'POST' });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || res.statusText);
+    }
+
+    const model = await res.json();
+    console.log('[NORMALIZE] Model updated:', model.planes.length, 'planes');
+
+    // Full reload of wall visuals
+    while (wallGroup.children.length) wallGroup.remove(wallGroup.children[0]);
+    wallObjects = [];
+
+    let wallCount = 0;
+    for (let i = 0; i < model.planes.length; i++) {
+      const plane = model.planes[i];
+      if (plane.kind !== 'wall') continue;
+      addPlaneToScene(plane, false, i);
+      wallCount++;
+    }
+
+    document.getElementById('hud-walls').textContent = wallCount;
+    document.getElementById('hud-planes').textContent = model.planes.length;
+
+    actionStatus.textContent = `Walls normalized (${wallCount} walls)`;
+    actionStatus.style.color = '#4caf50';
+  } catch (err) {
+    console.error('[NORMALIZE]', err);
+    actionStatus.textContent = `Error: ${err.message}`;
+    actionStatus.style.color = '#ff1744';
+  }
+
+  normalizeBtn.disabled = false;
+  setTimeout(() => { actionStatus.textContent = ''; actionStatus.style.color = '#aaa'; }, 3000);
+});

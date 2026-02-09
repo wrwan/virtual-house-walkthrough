@@ -19,7 +19,11 @@ from fastapi.responses import JSONResponse
 
 from packages.core.types import DetectedPlane, ParametricModel
 from packages.pipeline.loader import load_point_cloud
-from packages.pipeline.plane_detection import refine_wall_from_corners
+from packages.pipeline.plane_detection import (
+    normalize_walls,
+    refine_wall_from_corners,
+    trim_wall_at_intersection,
+)
 from packages.pipeline.process import process_scan
 
 # Configure logging
@@ -190,3 +194,77 @@ def add_manual_wall(req: ManualWallRequest):
     logger.info(f"✅ Manual wall added — model now has {len(model.planes)} planes")
 
     return JSONResponse(content=json.loads(plane.model_dump_json()))
+
+
+@app.delete("/wall/{index}")
+def delete_wall(index: int):
+    """Delete a wall by its index in the planes list."""
+    if _state["model"] is None:
+        raise HTTPException(404, "No scan uploaded yet")
+
+    model: ParametricModel = _state["model"]
+    if index < 0 or index >= len(model.planes):
+        raise HTTPException(400, f"Invalid wall index {index} (have {len(model.planes)} planes)")
+
+    removed = model.planes.pop(index)
+    logger.info(f"🗑️  Deleted wall {index} ({removed.inlier_count} pts) — {len(model.planes)} planes remaining")
+    return {"deleted": index, "remaining": len(model.planes)}
+
+
+class TrimWallRequest(PydanticBaseModel):
+    """Body for the wall trimming endpoint."""
+    wall_index: int
+    clipper_index: int
+
+
+@app.post("/trim-wall")
+def trim_wall(req: TrimWallRequest):
+    """Trim a wall so it doesn't poke through another wall.
+
+    The wall at *wall_index* is clipped at its intersection with the wall
+    at *clipper_index*.  The clipped wall is updated in-place.
+    """
+    if _state["model"] is None:
+        raise HTTPException(404, "No scan uploaded yet")
+
+    model: ParametricModel = _state["model"]
+    n = len(model.planes)
+    if req.wall_index < 0 or req.wall_index >= n:
+        raise HTTPException(400, f"Invalid wall_index {req.wall_index}")
+    if req.clipper_index < 0 or req.clipper_index >= n:
+        raise HTTPException(400, f"Invalid clipper_index {req.clipper_index}")
+    if req.wall_index == req.clipper_index:
+        raise HTTPException(400, "wall_index and clipper_index must differ")
+
+    wall = model.planes[req.wall_index]
+    clipper = model.planes[req.clipper_index]
+
+    logger.info(f"✂️  Trimming wall {req.wall_index} at wall {req.clipper_index}")
+    try:
+        trimmed = trim_wall_at_intersection(wall, clipper)
+    except Exception as e:
+        logger.exception("Trim failed")
+        raise HTTPException(500, f"Trim failed: {e}")
+
+    model.planes[req.wall_index] = trimmed
+    logger.info("✅ Wall trimmed successfully")
+    return JSONResponse(content=json.loads(trimmed.model_dump_json()))
+
+
+@app.post("/normalize-walls")
+def normalize_walls_endpoint():
+    """Snap walls to clean angles and uniform thickness."""
+    if _state["model"] is None:
+        raise HTTPException(404, "No scan uploaded yet")
+
+    model: ParametricModel = _state["model"]
+    logger.info(f"📐 Normalizing {len(model.planes)} walls")
+
+    try:
+        model.planes = normalize_walls(model.planes)
+    except Exception as e:
+        logger.exception("Normalization failed")
+        raise HTTPException(500, f"Normalization failed: {e}")
+
+    logger.info(f"✅ Normalized to {len(model.planes)} walls")
+    return JSONResponse(content=json.loads(model.model_dump_json()))
