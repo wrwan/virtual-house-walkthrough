@@ -115,10 +115,8 @@ scene.add(planeGroup);
 
 // Per-kind sub-groups for individual toggles
 const wallGroup = new THREE.Group(); wallGroup.name = 'walls';
-// const floorGroup = new THREE.Group(); floorGroup.name = 'floor';
-// const ceilingGroup = new THREE.Group(); ceilingGroup.name = 'ceiling';
-// planeGroup.add(wallGroup, floorGroup, ceilingGroup);
-planeGroup.add(wallGroup);
+const floorGroup = new THREE.Group(); floorGroup.name = 'floor';
+planeGroup.add(wallGroup, floorGroup);
 
 // Track wall objects for selection/deletion
 // Each entry: { index, lineObj, fillObj, plane }
@@ -263,21 +261,15 @@ async function loadModel(uploadInfo) {
 
   // Clear previous planes
   while (wallGroup.children.length) wallGroup.remove(wallGroup.children[0]);
-  // while (floorGroup.children.length) floorGroup.remove(floorGroup.children[0]);
-  // while (ceilingGroup.children.length) ceilingGroup.remove(ceilingGroup.children[0]);
+  while (floorGroup.children.length) floorGroup.remove(floorGroup.children[0]);
 
   let wallCount = 0;
-  // let floorCount = 0, ceilingCount = 0;
+  let floorCount = 0;
   wallObjects = [];
 
-  console.log('[MODEL] Building plane visualizations (walls only)...');
+  console.log('[MODEL] Building plane visualizations...');
   for (let planeIdx = 0; planeIdx < model.planes.length; planeIdx++) {
     const plane = model.planes[planeIdx];
-    // Skip non-wall planes
-    if (plane.kind !== 'wall') {
-      console.log(`[MODEL] Skipping ${plane.kind} plane`);
-      continue;
-    }
     
     if (!plane.bounds) continue;
     const b = plane.bounds;
@@ -306,6 +298,7 @@ async function loadModel(uploadInfo) {
     fillMesh.userData.wallIndex = planeIdx;
 
     const group = plane.kind === 'wall' ? wallGroup
+                : plane.kind === 'floor' ? floorGroup
                 : planeGroup;
 
     group.add(line);
@@ -314,17 +307,17 @@ async function loadModel(uploadInfo) {
     wallObjects.push({ index: planeIdx, lineObj: line, fillObj: fillMesh, plane });
 
     if (plane.kind === 'wall') wallCount++;
+    else if (plane.kind === 'floor') floorCount++;
   }
 
-  console.log(`[MODEL] Created ${wallCount} walls (floor/ceiling disabled)`);
+  console.log(`[MODEL] Created ${wallCount} walls, ${floorCount} floor`);
 
   // Update HUD
   document.getElementById('hud-file').textContent = model.source_file || uploadInfo?.filename || '—';
   document.getElementById('hud-points').textContent = (model.point_count || 0).toLocaleString();
   document.getElementById('hud-planes').textContent = model.planes.length;
   document.getElementById('hud-walls').textContent = wallCount;
-  document.getElementById('hud-floor').textContent = '—';
-  document.getElementById('hud-ceiling').textContent = '—';
+  document.getElementById('hud-floor').textContent = floorCount;
   console.log('[MODEL] Model loaded successfully');
 }
 
@@ -338,12 +331,9 @@ document.getElementById('toggle-planes').addEventListener('change', (e) => {
 document.getElementById('toggle-walls').addEventListener('change', (e) => {
   wallGroup.visible = e.target.checked;
 });
-// document.getElementById('toggle-floor').addEventListener('change', (e) => {
-//   floorGroup.visible = e.target.checked;
-// });
-// document.getElementById('toggle-ceiling').addEventListener('change', (e) => {
-//   ceilingGroup.visible = e.target.checked;
-// });
+document.getElementById('toggle-floor').addEventListener('change', (e) => {
+  floorGroup.visible = e.target.checked;
+});
 
 document.getElementById('btn-reset').addEventListener('click', () => {
   const cloud = pointCloudGroup.children[0];

@@ -98,20 +98,26 @@ def _classify_plane(
     return PlaneKind.WALL
 
 
-def _relabel_horizontal_planes(planes: list[DetectedPlane]) -> None:
-    """Relabel horizontal planes: the lowest becomes *floor*, the highest *ceiling*.
+def _collect_floor_planes(
+    planes: list[DetectedPlane],
+    height_tolerance: float = 0.5,
+) -> list[DetectedPlane]:
+    """Return all horizontal planes that belong to the floor level.
 
-    When there are more than two horizontal planes, the one closest to the
-    global minimum Z is the floor and the one closest to the maximum Z is the
-    ceiling; the rest stay as FLOOR (secondary floor slabs, etc.).
+    Keeps every horizontal plane whose height (bounds centre Z) is
+    within *height_tolerance* of the lowest detected horizontal plane.
+    This allows a non-rectangular floor to be represented by multiple
+    spatially separate segments while discarding planes at clearly
+    different heights (e.g. ceiling, mezzanine).
     """
     horizontal = [p for p in planes if p.kind == PlaneKind.FLOOR]
-    if len(horizontal) < 2:
-        return
-    # Use bounds min-z as proxy for height of each horizontal plane
-    horizontal.sort(key=lambda p: p.bounds.min.z if p.bounds else 0.0)
-    # Lowest → floor (already labelled), highest → ceiling
-    horizontal[-1].kind = PlaneKind.CEILING
+    if not horizontal:
+        return []
+    # Sort by centre-Z so lowest is first
+    horizontal.sort(key=lambda p: ((p.bounds.min.z + p.bounds.max.z) / 2) if p.bounds else 0.0)
+    floor_z = ((horizontal[0].bounds.min.z + horizontal[0].bounds.max.z) / 2) if horizontal[0].bounds else 0.0
+    return [p for p in horizontal
+            if p.bounds and abs((p.bounds.min.z + p.bounds.max.z) / 2 - floor_z) <= height_tolerance]
 
 
 def _inlier_bounds(points: np.ndarray, mask: np.ndarray) -> BBox:
@@ -512,14 +518,14 @@ def detect_planes(
         remaining = remaining[~inlier_mask]
         active_mask[active_indices[inlier_mask]] = False
 
-    # DISABLED: Floor/ceiling relabelling — only walls for now
-    # _relabel_horizontal_planes(planes)
-
-    # Filter to walls only
-    planes = [p for p in planes if p.kind == PlaneKind.WALL]
+    # Keep only walls + floor-level horizontal planes
+    walls = [p for p in planes if p.kind == PlaneKind.WALL]
+    floors = _collect_floor_planes(planes)
 
     # Fuse nearly-coplanar overlapping wall segments into single walls
-    planes = _fuse_coplanar_planes(planes)
+    walls = _fuse_coplanar_planes(walls)
+
+    planes = walls + floors
 
     return planes
 
@@ -621,6 +627,9 @@ def normalize_walls(
 ) -> list[DetectedPlane]:
     """Clean up wall geometry: snap angles, unify thickness, align heights.
 
+    Only WALL planes are modified. FLOOR and CEILING planes are passed
+    through unchanged.
+
     Steps:
 
     1. **Compute dominant directions** – find the principal wall normal and
@@ -631,12 +640,16 @@ def normalize_walls(
     3. **Align heights** – use a representative wall height and apply it
        uniformly, snapping the base to the lowest detected base.
     """
-    if len(planes) < 2:
-        return planes
+    # Separate walls from non-wall planes (floor, ceiling)
+    walls = [p for p in planes if p.kind == PlaneKind.WALL]
+    non_walls = [p for p in planes if p.kind != PlaneKind.WALL]
+
+    if len(walls) < 2:
+        return walls + non_walls
 
     # Gather normals projected onto XY (horizontal plane)
     normals_2d = []
-    for p in planes:
+    for p in walls:
         n = np.array([p.normal.x, p.normal.y, p.normal.z])
         n2d = n[:2]
         length = np.linalg.norm(n2d)
@@ -646,14 +659,14 @@ def normalize_walls(
             normals_2d.append(np.array([1.0, 0.0]))
 
     # Dominant direction: the normal with the most inliers
-    dominant_idx = max(range(len(planes)), key=lambda i: planes[i].inlier_count)
+    dominant_idx = max(range(len(walls)), key=lambda i: walls[i].inlier_count)
     ref_angle = float(np.degrees(np.arctan2(normals_2d[dominant_idx][1], normals_2d[dominant_idx][0])))
 
     # --- collect per-wall metrics ---
     thicknesses = []
     heights = []
     bases = []
-    for p in planes:
+    for p in walls:
         if p.bounds is None:
             continue
         b = p.bounds
@@ -677,7 +690,7 @@ def normalize_walls(
     )
 
     result: list[DetectedPlane] = []
-    for i, plane in enumerate(planes):
+    for i, plane in enumerate(walls):
         if plane.bounds is None:
             result.append(plane)
             continue
@@ -761,7 +774,7 @@ def normalize_walls(
     result = _snap_corners(result, snap_distance=1.0)
 
     logger.info("  ✅ Normalized %d walls", len(result))
-    return result
+    return result + non_walls
 
 
 def _wall_long_axis(bounds: BBox) -> int:

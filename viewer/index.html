@@ -131,10 +131,7 @@
     <div class="row"><span>Points</span> <span id="hud-points">—</span></div>
     <div class="row"><span>Planes</span> <span id="hud-planes">—</span></div>
     <div class="row"><span>Walls</span> <span id="hud-walls">—</span></div>
-    <!-- <div class="row"><span>Floor</span> <span id="hud-floor">—</span></div> -->
-    <!-- <div class="row"><span>Ceiling</span> <span id="hud-ceiling">—</span></div> -->
-    <div id="hud-floor" style="display:none">—</div>
-    <div id="hud-ceiling" style="display:none">—</div>
+    <div class="row"><span>Floor</span> <span id="hud-floor">—</span></div>
   </div>
 
   <!-- Controls panel (shown after load) -->
@@ -143,13 +140,9 @@
     <label><input type="checkbox" id="toggle-points" checked /> Point Cloud</label>
     <label><input type="checkbox" id="toggle-planes" checked /> Detected Planes</label>
     <label><input type="checkbox" id="toggle-walls" checked /> Walls only</label>
-    <!-- <label><input type="checkbox" id="toggle-floor" checked /> Floor</label> -->
-    <!-- <label><input type="checkbox" id="toggle-ceiling" checked /> Ceiling</label> -->
-    <input type="checkbox" id="toggle-floor" checked style="display:none" />
-    <input type="checkbox" id="toggle-ceiling" checked style="display:none" />
+    <label><input type="checkbox" id="toggle-floor" checked /> Floor</label>
     <div class="legend">
-      <!-- <div class="legend-item"><div class="legend-swatch" style="background:#4caf50"></div> Floor</div> -->
-      <!-- <div class="legend-item"><div class="legend-swatch" style="background:#2196f3"></div> Ceiling</div> -->
+      <div class="legend-item"><div class="legend-swatch" style="background:#4caf50"></div> Floor</div>
       <div class="legend-item"><div class="legend-swatch" style="background:#ff9800"></div> Walls</div>
       <div class="legend-item"><div class="legend-swatch" style="background:#e91e63"></div> Manual</div>
     </div>

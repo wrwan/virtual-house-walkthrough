@@ -55,7 +55,9 @@ def process_scan(
 
     logger.info("Normalizing walls …")
     planes = normalize_walls(planes)
-    logger.info("Normalized to %d walls", len(planes))
+    wall_count = sum(1 for p in planes if p.kind.value == "wall")
+    floor_count = sum(1 for p in planes if p.kind.value == "floor")
+    logger.info("After normalize: %d walls, %d floor", wall_count, floor_count)
 
     model = build_parametric_model(
         source_file=input_path.name,
