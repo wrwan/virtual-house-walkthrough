@@ -702,23 +702,43 @@ def normalize_walls(
 
         new_normal = Vec3(x=new_nx, y=new_ny, z=new_nz)
 
-        # ── 2. recompute offset so plane still passes through centre ──
+        # ── 2. recompute offset so plane passes through the original
+        #    plane position, not the AABB centre.  We keep the original
+        #    offset for the thin-axis centring in step 3 and only update
+        #    the offset for the long axes.
         cx = (b.min.x + b.max.x) / 2
         cy = (b.min.y + b.max.y) / 2
         cz = (b.min.z + b.max.z) / 2
-        new_offset = new_nx * cx + new_ny * cy + new_nz * cz
 
-        # ── 3. normalise thickness ────────────────────────────
+        # Use original normal + offset to find where the *original* plane
+        # sits along the thin axis.  We must use the original normal here
+        # because the snapped normal may have flipped direction, which would
+        # invert the sign of plane_pos.
         dims = np.array([b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z])
         thin_xy = int(np.argmin(dims[:2]))  # 0 or 1
+        nn = np.array([new_nx, new_ny, new_nz])
+        orig_n = np.array([plane.normal.x, plane.normal.y, plane.normal.z])
         center = np.array([cx, cy, cz])
 
+        if abs(orig_n[thin_xy]) > 1e-9:
+            other_sum = sum(orig_n[k] * center[k] for k in range(3) if k != thin_xy)
+            plane_pos = (plane.offset - other_sum) / orig_n[thin_xy]
+        else:
+            plane_pos = center[thin_xy]
+
+        # Recompute offset for the *snapped* normal, using plane_pos on
+        # the thin axis and AABB centres on the other axes.
+        center_for_offset = center.copy()
+        center_for_offset[thin_xy] = plane_pos
+        new_offset = float(np.dot(nn, center_for_offset))
+
+        # ── 3. normalise thickness, centred on actual plane ───
         new_min = np.array([b.min.x, b.min.y, b.min.z])
         new_max = np.array([b.max.x, b.max.y, b.max.z])
 
-        # Set thin axis to target_thickness, centred
-        new_min[thin_xy] = center[thin_xy] - target_thickness / 2
-        new_max[thin_xy] = center[thin_xy] + target_thickness / 2
+        # Set thin axis to target_thickness, centred on the plane
+        new_min[thin_xy] = plane_pos - target_thickness / 2
+        new_max[thin_xy] = plane_pos + target_thickness / 2
 
         # ── 4. normalise height ───────────────────────────────
         new_min[2] = common_base
