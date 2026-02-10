@@ -46,12 +46,59 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+// Drawn wall previews (declared early so animate loop can reference it)
+var drawnWalls = [];
+var editLabelDiv = null;
+
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
+  updateFloatingLabels();
   renderer.render(scene, camera);
 }
 animate();
+
+function updateFloatingLabels() {
+  for (const entry of drawnWalls) {
+    const worldPos = entry.topLocal.clone();
+    planeGroup.localToWorld(worldPos);
+    worldPos.y += 0.15;
+
+    const projected = worldPos.clone().project(camera);
+    if (projected.z > 1) { entry.labelDiv.style.display = 'none'; continue; }
+
+    entry.labelDiv.style.display = '';
+    const x = (projected.x * 0.5 + 0.5) * window.innerWidth;
+    const y = (-projected.y * 0.5 + 0.5) * window.innerHeight;
+    entry.labelDiv.style.left = `${x}px`;
+    entry.labelDiv.style.top = `${y}px`;
+  }
+
+  // Update edit-mode floating delete label
+  if (editLabelDiv && editLabelDiv._wallEntry) {
+    const we = editLabelDiv._wallEntry;
+    if (!we.fillObj) { removeEditLabel(); return; }
+    const b = we.plane.bounds;
+    if (!b) { removeEditLabel(); return; }
+    const topLocal = new THREE.Vector3(
+      (b.max.x + b.min.x) / 2,
+      (b.max.y + b.min.y) / 2,
+      b.max.z
+    );
+    const worldPos = topLocal.clone();
+    planeGroup.localToWorld(worldPos);
+    worldPos.y += 0.15;
+
+    const projected = worldPos.clone().project(camera);
+    if (projected.z > 1) { editLabelDiv.style.display = 'none'; return; }
+
+    editLabelDiv.style.display = '';
+    const x = (projected.x * 0.5 + 0.5) * window.innerWidth;
+    const y = (-projected.y * 0.5 + 0.5) * window.innerHeight;
+    editLabelDiv.style.left = `${x}px`;
+    editLabelDiv.style.top = `${y}px`;
+  }
+}
 
 // ── Groups for toggling ─────────────────────────────────────────────
 const pointCloudGroup = new THREE.Group();
@@ -314,16 +361,26 @@ document.getElementById('btn-new').addEventListener('click', () => {
   document.getElementById('controls').style.display = 'none';
 });
 
-// ── Manual wall corner picking ──────────────────────────────────────
+// ── Manual wall drawing mode ────────────────────────────────────────
 const manualWallBtn = document.getElementById('btn-add-wall');
 const manualWallStatus = document.getElementById('manual-wall-status');
+const floatingLabels = document.getElementById('floating-labels');
+const generateAllBtn = document.getElementById('btn-generate-all');
+
 let manualMode = false;
-let pickedCorners = [];       // world-space Vec3[]
-let cornerMarkers = [];       // Three.js meshes
-let edgeLines = [];            // Three.js line segments
+let pickedCorners = [];       // world-space Vec3[] for current pick
+let cornerMarkers = [];       // Three.js meshes for current pick
+let edgeLines = [];            // Three.js line segments for current pick
 const cornerGroup = new THREE.Group();
 cornerGroup.name = 'cornerMarkers';
 scene.add(cornerGroup);
+
+// Drawn wall previews awaiting generation
+// (drawnWalls declared early near animate loop)
+let drawnWallId = 0;
+const previewGroup = new THREE.Group();
+previewGroup.name = 'wallPreviews';
+planeGroup.add(previewGroup);
 
 manualWallBtn.addEventListener('click', () => {
   if (manualMode) {
@@ -333,28 +390,36 @@ manualWallBtn.addEventListener('click', () => {
   }
 });
 
+generateAllBtn.addEventListener('click', () => {
+  generateAllDrawnWalls();
+});
+
 function enterManualMode() {
   manualMode = true;
   pickedCorners = [];
-  clearCornerVisuals();
+  clearCurrentCornerVisuals();
   manualWallBtn.classList.add('active-mode');
-  manualWallBtn.textContent = 'Cancel';
+  manualWallBtn.textContent = 'Cancel Drawing';
   manualWallStatus.textContent = 'Click 4 points on the wall (0/4)';
-  controls.enabled = true;  // orbit stays on; we pick on click events
+  controls.enabled = true;
   renderer.domElement.addEventListener('pointerdown', onManualPointerDown);
 }
 
 function exitManualMode() {
   manualMode = false;
   pickedCorners = [];
-  clearCornerVisuals();
+  clearCurrentCornerVisuals();
   manualWallBtn.classList.remove('active-mode');
   manualWallBtn.textContent = '+ Add Wall';
-  manualWallStatus.textContent = '';
+  if (drawnWalls.length > 0) {
+    manualWallStatus.textContent = `${drawnWalls.length} wall(s) drawn — Generate or click + Add Wall to draw more.`;
+  } else {
+    manualWallStatus.textContent = '';
+  }
   renderer.domElement.removeEventListener('pointerdown', onManualPointerDown);
 }
 
-function clearCornerVisuals() {
+function clearCurrentCornerVisuals() {
   while (cornerGroup.children.length) cornerGroup.remove(cornerGroup.children[0]);
   cornerMarkers = [];
   edgeLines = [];
@@ -362,41 +427,33 @@ function clearCornerVisuals() {
 
 // Raycaster against the point cloud
 const raycaster = new THREE.Raycaster();
-raycaster.params.Points.threshold = 0.05;  // hit tolerance in world units
+raycaster.params.Points.threshold = 0.05;
 const mouse = new THREE.Vector2();
 
-let pointerDownPos = null; // track drag vs click
+let pointerDownPos = null;
 
 function onManualPointerDown(e) {
   if (!manualMode) return;
-  // record start position to distinguish drag from click
   pointerDownPos = { x: e.clientX, y: e.clientY };
   renderer.domElement.addEventListener('pointerup', onManualPointerUp, { once: true });
 }
 
 function onManualPointerUp(e) {
   if (!manualMode || !pointerDownPos) return;
-  // if user dragged more than 5px, treat as orbit, not pick
   const dx = e.clientX - pointerDownPos.x;
   const dy = e.clientY - pointerDownPos.y;
   if (Math.sqrt(dx * dx + dy * dy) > 5) return;
-  if (e.button !== 0) return;  // left click only
+  if (e.button !== 0) return;
 
   mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
   mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
-
   raycaster.setFromCamera(mouse, camera);
 
-  // Intersect against all Points objects in the rotated pointCloudGroup
   const intersections = raycaster.intersectObjects(pointCloudGroup.children, true);
-  if (intersections.length === 0) {
-    console.log('[MANUAL] No intersection found');
-    return;
-  }
+  if (intersections.length === 0) return;
 
-  // The intersection point is in world space already
   const hit = intersections[0].point.clone();
-  console.log(`[MANUAL] Picked corner ${pickedCorners.length + 1}: (${hit.x.toFixed(3)}, ${hit.y.toFixed(3)}, ${hit.z.toFixed(3)})`);
+  console.log(`[DRAW] Corner ${pickedCorners.length + 1}: (${hit.x.toFixed(3)}, ${hit.y.toFixed(3)}, ${hit.z.toFixed(3)})`);
 
   pickedCorners.push(hit);
   addCornerMarker(hit);
@@ -408,16 +465,17 @@ function onManualPointerUp(e) {
   manualWallStatus.textContent = `Click 4 points on the wall (${pickedCorners.length}/4)`;
 
   if (pickedCorners.length >= 4) {
-    // Close the loop visually
     addEdgeLine(pickedCorners[3], pickedCorners[0]);
-    manualWallStatus.textContent = 'Refining wall against point cloud…';
-    submitManualWall();
+    createWallPreview([...pickedCorners]);
+    pickedCorners = [];
+    clearCurrentCornerVisuals();
+    manualWallStatus.textContent = `${drawnWalls.length} wall(s) drawn — pick 4 more or Generate.`;
   }
 }
 
 function addCornerMarker(pos) {
   const geo = new THREE.SphereGeometry(0.04, 12, 12);
-  const mat = new THREE.MeshBasicMaterial({ color: 0xe91e63 });
+  const mat = new THREE.MeshBasicMaterial({ color: 0x00e5ff });
   const sphere = new THREE.Mesh(geo, mat);
   sphere.position.copy(pos);
   cornerGroup.add(sphere);
@@ -426,29 +484,123 @@ function addCornerMarker(pos) {
 
 function addEdgeLine(a, b) {
   const geo = new THREE.BufferGeometry().setFromPoints([a, b]);
-  const mat = new THREE.LineBasicMaterial({ color: 0xe91e63, linewidth: 2 });
+  const mat = new THREE.LineBasicMaterial({ color: 0x00e5ff, linewidth: 2 });
   const line = new THREE.Line(geo, mat);
   cornerGroup.add(line);
   edgeLines.push(line);
 }
 
-async function submitManualWall() {
-  // Convert picked world-space corners back to the point-cloud's local
-  // coordinate system (undo the -90° X rotation on pointCloudGroup).
-  // pointCloudGroup.rotation.x = -PI/2  →  inverse is +PI/2
-  const invMatrix = new THREE.Matrix4().copy(pointCloudGroup.matrixWorld).invert();
-  const corners = pickedCorners.map(p => {
-    const local = p.clone().applyMatrix4(invMatrix);
+// ── Wall preview management ─────────────────────────────────────────
+
+function createWallPreview(worldCorners) {
+  const invMatrix = new THREE.Matrix4().copy(planeGroup.matrixWorld).invert();
+  const localCorners = worldCorners.map(p => p.clone().applyMatrix4(invMatrix));
+
+  const min = localCorners[0].clone();
+  const max = localCorners[0].clone();
+  for (const c of localCorners) { min.min(c); max.max(c); }
+
+  const sx = max.x - min.x;
+  const sy = max.y - min.y;
+  const sz = max.z - min.z;
+  const cx = (max.x + min.x) / 2;
+  const cy = (max.y + min.y) / 2;
+  const cz = (max.z + min.z) / 2;
+
+  const grp = new THREE.Group();
+
+  // Dashed wireframe
+  const boxGeo = new THREE.BoxGeometry(Math.max(sx, 0.01), Math.max(sy, 0.01), Math.max(sz, 0.01));
+  const edges = new THREE.EdgesGeometry(boxGeo);
+  const lineMat = new THREE.LineDashedMaterial({ color: 0x00e5ff, dashSize: 0.1, gapSize: 0.05, linewidth: 2 });
+  const lineObj = new THREE.LineSegments(edges, lineMat);
+  lineObj.computeLineDistances();
+  lineObj.position.set(cx, cy, cz);
+  grp.add(lineObj);
+
+  // Transparent fill
+  const fillMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.15, side: THREE.DoubleSide });
+  const fillObj = new THREE.Mesh(boxGeo.clone(), fillMat);
+  fillObj.position.set(cx, cy, cz);
+  grp.add(fillObj);
+
+  // Corner spheres
+  for (const c of localCorners) {
+    const geo = new THREE.SphereGeometry(0.04, 8, 8);
+    const s = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x00e5ff }));
+    s.position.copy(c);
+    grp.add(s);
+  }
+  // Edge lines
+  for (let i = 0; i < localCorners.length; i++) {
+    const a = localCorners[i], b = localCorners[(i + 1) % localCorners.length];
+    const geo = new THREE.BufferGeometry().setFromPoints([a, b]);
+    grp.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0x00e5ff })));
+  }
+
+  previewGroup.add(grp);
+
+  // Corners for API submission (in pointCloudGroup local space)
+  const pcInv = new THREE.Matrix4().copy(pointCloudGroup.matrixWorld).invert();
+  const apiCorners = worldCorners.map(p => {
+    const local = p.clone().applyMatrix4(pcInv);
     return [local.x, local.y, local.z];
   });
 
-  console.log('[MANUAL] Submitting corners to /api/manual-wall:', corners);
+  // Floating HTML label
+  const id = drawnWallId++;
+  const labelDiv = document.createElement('div');
+  labelDiv.className = 'wall-label';
+  labelDiv.innerHTML = `
+    <button class="btn-gen" data-id="${id}">Generate</button>
+    <button class="btn-del" data-id="${id}">Delete</button>
+  `;
+  labelDiv.querySelector('.btn-gen').addEventListener('click', () => generateDrawnWall(id));
+  labelDiv.querySelector('.btn-del').addEventListener('click', () => deleteDrawnWall(id));
+  floatingLabels.appendChild(labelDiv);
+
+  drawnWalls.push({
+    id,
+    corners: apiCorners,
+    previewGrp: grp,
+    labelDiv,
+    topLocal: new THREE.Vector3(cx, cy, max.z),
+  });
+
+  generateAllBtn.style.display = '';
+}
+
+function deleteDrawnWall(id) {
+  const idx = drawnWalls.findIndex(w => w.id === id);
+  if (idx === -1) return;
+  const entry = drawnWalls[idx];
+
+  previewGroup.remove(entry.previewGrp);
+  entry.previewGrp.traverse(child => { if (child.geometry) child.geometry.dispose(); });
+  floatingLabels.removeChild(entry.labelDiv);
+
+  drawnWalls.splice(idx, 1);
+  generateAllBtn.style.display = drawnWalls.length > 0 ? '' : 'none';
+  manualWallStatus.textContent = drawnWalls.length > 0
+    ? `${drawnWalls.length} wall(s) drawn.`
+    : (manualMode ? 'Click 4 points on the wall (0/4)' : '');
+}
+
+async function generateDrawnWall(id) {
+  const idx = drawnWalls.findIndex(w => w.id === id);
+  if (idx === -1) return;
+  const entry = drawnWalls[idx];
+
+  const genBtn = entry.labelDiv.querySelector('.btn-gen');
+  const delBtn = entry.labelDiv.querySelector('.btn-del');
+  genBtn.disabled = true;  genBtn.textContent = '…';
+  delBtn.disabled = true;
 
   try {
     const res = await fetch(`${API}/manual-wall`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ corners }),
+      body: JSON.stringify({ corners: entry.corners }),
     });
 
     if (!res.ok) {
@@ -457,29 +609,48 @@ async function submitManualWall() {
     }
 
     const plane = await res.json();
-    console.log('[MANUAL] Wall refined:', plane);
+    console.log('[GENERATE] Wall created:', plane);
 
-    // Render the new wall — server index is planes.length - 1
     const serverIdx = parseInt(document.getElementById('hud-planes').textContent) || 0;
     addPlaneToScene(plane, true, serverIdx);
 
-    manualWallStatus.textContent = `Wall added! (${plane.inlier_count} inlier points)`;
+    const wc = parseInt(document.getElementById('hud-walls').textContent) || 0;
+    document.getElementById('hud-walls').textContent = wc + 1;
+    const pc = parseInt(document.getElementById('hud-planes').textContent) || 0;
+    document.getElementById('hud-planes').textContent = pc + 1;
 
-    // Update HUD wall count
-    const currentCount = parseInt(document.getElementById('hud-walls').textContent) || 0;
-    document.getElementById('hud-walls').textContent = currentCount + 1;
-    const planesCount = parseInt(document.getElementById('hud-planes').textContent) || 0;
-    document.getElementById('hud-planes').textContent = planesCount + 1;
+    deleteDrawnWall(id);
+    manualWallStatus.textContent = `Wall generated! (${plane.inlier_count} inliers). ${drawnWalls.length} drawn.`;
   } catch (err) {
-    console.error('[MANUAL] Error:', err);
-    manualWallStatus.textContent = `\u274c ${err.message}`;
+    console.error('[GENERATE]', err);
+    genBtn.disabled = false;  genBtn.textContent = 'Generate';
+    delBtn.disabled = false;
+    manualWallStatus.textContent = `Error: ${err.message}`;
+  }
+}
+
+async function generateAllDrawnWalls() {
+  if (drawnWalls.length === 0) return;
+  generateAllBtn.disabled = true;
+  generateAllBtn.textContent = 'Generating…';
+  const total = drawnWalls.length;
+  manualWallStatus.textContent = `Generating ${total} wall(s)…`;
+
+  const ids = drawnWalls.map(w => w.id);
+  let success = 0, failed = 0;
+
+  for (const id of ids) {
+    try {
+      await generateDrawnWall(id);
+      success++;
+      manualWallStatus.textContent = `Generating… (${success}/${total})`;
+    } catch { failed++; }
   }
 
-  // Clean up corner markers after a delay so user can see them
-  setTimeout(() => {
-    clearCornerVisuals();
-    exitManualMode();
-  }, 1500);
+  generateAllBtn.disabled = false;
+  generateAllBtn.textContent = 'Generate All Drawn';
+  generateAllBtn.style.display = drawnWalls.length > 0 ? '' : 'none';
+  manualWallStatus.textContent = `Generated ${success} wall(s)${failed ? `, ${failed} failed` : ''}.`;
 }
 
 /** Add a single plane object to the 3D scene. */
@@ -515,11 +686,12 @@ function addPlaneToScene(plane, isManual = false, serverIndex = -1) {
   wallObjects.push({ index: idx, lineObj: line, fillObj: fillMesh, plane });
 }
 
-// ── Wall selection / deletion / trim ────────────────────────────────
+// ── Wall selection / deletion / edit mode ───────────────────────────
 const actionStatus = document.getElementById('action-status');
 let selectedWallEntry = null;      // current wallObjects entry or null
 let trimMode = false;
 let trimFirstWall = null;         // wallObjects entry of the first pick
+let editMode = false;
 
 /** Highlight a wall red (selected) or reset to orange. */
 function setWallHighlight(entry, highlighted) {
@@ -548,75 +720,138 @@ function raycastWalls(event) {
   return findWallEntry(wallIdx);
 }
 
-// Click on canvas to select/deselect walls (when NOT in manual-add or trim mode)
-renderer.domElement.addEventListener('dblclick', (e) => {
+// ── Edit walls mode ─────────────────────────────────────────────────
+const editBtn = document.getElementById('btn-edit-walls');
+
+editBtn.addEventListener('click', () => {
+  if (editMode) {
+    exitEditMode();
+  } else {
+    enterEditMode();
+  }
+});
+
+function enterEditMode() {
   if (manualMode || trimMode) return;
+  editMode = true;
+  editBtn.classList.add('active-mode');
+  editBtn.textContent = 'Done Editing';
+  actionStatus.textContent = 'Click any wall to select it for deletion.';
+  actionStatus.style.color = '#ff1744';
+  renderer.domElement.addEventListener('pointerdown', onEditPointerDown);
+}
+
+function exitEditMode() {
+  editMode = false;
+  if (selectedWallEntry) { setWallHighlight(selectedWallEntry, false); selectedWallEntry = null; }
+  removeEditLabel();
+  editBtn.classList.remove('active-mode');
+  editBtn.textContent = 'Edit Walls';
+  actionStatus.textContent = '';
+  actionStatus.style.color = '#aaa';
+  renderer.domElement.removeEventListener('pointerdown', onEditPointerDown);
+}
+
+let editPointerDown = null;
+
+function onEditPointerDown(e) {
+  if (!editMode) return;
+  editPointerDown = { x: e.clientX, y: e.clientY };
+  renderer.domElement.addEventListener('pointerup', onEditPointerUp, { once: true });
+}
+
+function onEditPointerUp(e) {
+  if (!editMode || !editPointerDown) return;
+  const dx = e.clientX - editPointerDown.x;
+  const dy = e.clientY - editPointerDown.y;
+  if (Math.sqrt(dx * dx + dy * dy) > 5) return;
+  if (e.button !== 0) return;
 
   const entry = raycastWalls(e);
 
   // Deselect previous
   if (selectedWallEntry) {
     setWallHighlight(selectedWallEntry, false);
+    removeEditLabel();
   }
 
   if (entry && entry !== selectedWallEntry) {
     selectedWallEntry = entry;
     setWallHighlight(entry, true);
-    actionStatus.textContent = `Wall ${entry.index} selected — press Delete or click Trim`;
+    showEditLabel(entry);
+    actionStatus.textContent = `Wall ${entry.index} selected.`;
     actionStatus.style.color = '#ff1744';
   } else {
     selectedWallEntry = null;
-    actionStatus.textContent = '';
-    actionStatus.style.color = '#aaa';
+    actionStatus.textContent = 'Click any wall to select it.';
+    actionStatus.style.color = '#ff1744';
   }
-});
+}
 
-// Delete key removes selected wall
-window.addEventListener('keydown', async (e) => {
-  if (e.key === 'Delete' && selectedWallEntry && !manualMode && !trimMode) {
-    const idx = selectedWallEntry.index;
-    actionStatus.textContent = `Deleting wall ${idx}…`;
+function showEditLabel(entry) {
+  removeEditLabel();
+  const div = document.createElement('div');
+  div.className = 'wall-edit-label';
+  div.innerHTML = `<button>Delete Wall</button>`;
+  div.querySelector('button').addEventListener('click', () => deleteSelectedWall());
+  floatingLabels.appendChild(div);
+  editLabelDiv = div;
+  // Store info needed for positioning
+  editLabelDiv._wallEntry = entry;
+}
 
-    try {
-      const res = await fetch(`${API}/wall/${idx}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || res.statusText);
-      }
+function removeEditLabel() {
+  if (editLabelDiv) {
+    floatingLabels.removeChild(editLabelDiv);
+    editLabelDiv = null;
+  }
+}
 
-      // Remove from scene
-      wallGroup.remove(selectedWallEntry.lineObj);
-      wallGroup.remove(selectedWallEntry.fillObj);
-      selectedWallEntry.lineObj.geometry.dispose();
-      selectedWallEntry.fillObj.geometry.dispose();
+async function deleteSelectedWall() {
+  if (!selectedWallEntry) return;
+  const idx = selectedWallEntry.index;
+  actionStatus.textContent = `Deleting wall ${idx}…`;
+  removeEditLabel();
 
-      wallObjects = wallObjects.filter(w => w !== selectedWallEntry);
-
-      // Re-index: entries after the deleted one shift down
-      for (const w of wallObjects) {
-        if (w.index > idx) {
-          w.index--;
-          w.lineObj.userData.wallIndex--;
-          w.fillObj.userData.wallIndex--;
-        }
-      }
-
-      selectedWallEntry = null;
-      actionStatus.textContent = `Wall ${idx} deleted`;
-      actionStatus.style.color = '#4caf50';
-
-      // Update HUD
-      document.getElementById('hud-walls').textContent = wallObjects.length;
-      document.getElementById('hud-planes').textContent = wallObjects.length;
-
-      setTimeout(() => { actionStatus.textContent = ''; actionStatus.style.color = '#aaa'; }, 2000);
-    } catch (err) {
-      console.error('[DELETE]', err);
-      actionStatus.textContent = `Error: ${err.message}`;
-      actionStatus.style.color = '#ff1744';
+  try {
+    const res = await fetch(`${API}/wall/${idx}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || res.statusText);
     }
+
+    wallGroup.remove(selectedWallEntry.lineObj);
+    wallGroup.remove(selectedWallEntry.fillObj);
+    selectedWallEntry.lineObj.geometry.dispose();
+    selectedWallEntry.fillObj.geometry.dispose();
+
+    wallObjects = wallObjects.filter(w => w !== selectedWallEntry);
+    for (const w of wallObjects) {
+      if (w.index > idx) {
+        w.index--;
+        w.lineObj.userData.wallIndex--;
+        w.fillObj.userData.wallIndex--;
+      }
+    }
+
+    selectedWallEntry = null;
+    actionStatus.textContent = `Wall ${idx} deleted`;
+    actionStatus.style.color = '#4caf50';
+    document.getElementById('hud-walls').textContent = wallObjects.length;
+    document.getElementById('hud-planes').textContent = wallObjects.length;
+
+    setTimeout(() => {
+      if (editMode) {
+        actionStatus.textContent = 'Click any wall to select it.';
+        actionStatus.style.color = '#ff1744';
+      }
+    }, 1500);
+  } catch (err) {
+    console.error('[DELETE]', err);
+    actionStatus.textContent = `Error: ${err.message}`;
+    actionStatus.style.color = '#ff1744';
   }
-});
+}
 
 // ── Trim intersection mode ──────────────────────────────────────────
 const trimBtn = document.getElementById('btn-trim-wall');

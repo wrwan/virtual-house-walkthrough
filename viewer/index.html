@@ -67,6 +67,41 @@
     .legend { margin-top: 10px; }
     .legend-item { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
     .legend-swatch { width: 12px; height: 12px; border-radius: 2px; }
+
+    /* ── Floating wall-preview labels ─────────────────────── */
+    #floating-labels {
+      position: fixed; top: 0; left: 0;
+      width: 100%; height: 100%;
+      pointer-events: none; z-index: 20;
+    }
+    .wall-label {
+      position: absolute;
+      transform: translate(-50%, -100%);
+      display: flex; gap: 4px;
+      pointer-events: auto;
+      padding-bottom: 6px;
+    }
+    .wall-label button {
+      padding: 4px 10px; border: none; border-radius: 4px;
+      cursor: pointer; font-size: 0.75rem; font-weight: 600;
+      white-space: nowrap;
+    }
+    .wall-label .btn-gen { background: #4caf50; color: #fff; }
+    .wall-label .btn-gen:hover { background: #388e3c; }
+    .wall-label .btn-del { background: #c62828; color: #fff; }
+    .wall-label .btn-del:hover { background: #b71c1c; }
+    .wall-edit-label {
+      position: absolute;
+      transform: translate(-50%, -100%);
+      pointer-events: auto;
+      padding-bottom: 6px;
+    }
+    .wall-edit-label button {
+      padding: 5px 14px; border: none; border-radius: 4px;
+      cursor: pointer; font-size: 0.8rem; font-weight: 600;
+      background: #c62828; color: #fff;
+    }
+    .wall-edit-label button:hover { background: #b71c1c; }
   </style>
 </head>
 <body>
@@ -85,6 +120,9 @@
 
   <!-- Three.js canvas -->
   <div id="canvas-container"></div>
+
+  <!-- Floating labels for drawn wall previews -->
+  <div id="floating-labels"></div>
 
   <!-- HUD (shown after load) -->
   <div id="hud" style="display:none">
@@ -116,8 +154,10 @@
       <div class="legend-item"><div class="legend-swatch" style="background:#e91e63"></div> Manual</div>
     </div>
     <button id="btn-add-wall">+ Add Wall</button>
+    <button id="btn-generate-all" style="display:none;background:#4caf50;margin-top:4px;">Generate All Drawn</button>
     <div id="manual-wall-status" style="font-size:0.8rem;color:#e91e63;margin-top:6px;min-height:1.2rem;"></div>
     <button id="btn-trim-wall">Trim Intersection</button>
+    <button id="btn-edit-walls">Edit Walls</button>
     <button id="btn-normalize">Normalize Walls</button>
     <div id="action-status" style="font-size:0.8rem;color:#aaa;margin-top:6px;min-height:1.2rem;"></div>
     <button id="btn-reset">Reset Camera</button>

@@ -760,9 +760,6 @@ def normalize_walls(
     # ── 5. snap wall endpoints to meet at corners ─────────────
     result = _snap_corners(result, snap_distance=1.0)
 
-    # ── 6. merge walls that overlap after normalization ───────
-    result = _merge_overlapping_walls(result)
-
     logger.info("  ✅ Normalized %d walls", len(result))
     return result
 
