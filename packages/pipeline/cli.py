@@ -22,7 +22,7 @@ def main():
 @click.argument("input_file", type=click.Path(exists=True, dir_okay=False))
 @click.option("-o", "--output", "output_file", default=None, help="Output JSON path.")
 @click.option("--voxel-size", default=0.05, show_default=True, help="Voxel grid size (metres).")
-@click.option("--max-planes", default=10, show_default=True, help="Max planes to detect.")
+@click.option("--max-planes", default=50, show_default=True, help="Max planes to detect.")
 @click.option("--seed", default=42, show_default=True, help="RANSAC random seed.")
 def process(
     input_file: str, output_file: str | None, voxel_size: float, max_planes: int, seed: int,

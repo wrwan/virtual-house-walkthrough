@@ -8,7 +8,7 @@ from pathlib import Path
 from packages.core.types import ParametricModel
 from packages.pipeline.loader import load_point_cloud
 from packages.pipeline.parametric import build_parametric_model
-from packages.pipeline.plane_detection import detect_planes
+from packages.pipeline.plane_detection import detect_planes, normalize_walls
 from packages.pipeline.preprocess import compute_bounds, voxel_downsample
 
 logger = logging.getLogger(__name__)
@@ -18,7 +18,7 @@ def process_scan(
     input_path: str | Path,
     *,
     voxel_size: float = 0.05,
-    max_planes: int = 10,
+    max_planes: int = 50,
     ransac_iterations: int = 1000,
     distance_threshold: float = 0.02,
     seed: int | None = None,
@@ -33,7 +33,8 @@ def process_scan(
     """
     input_path = Path(input_path)
     logger.info("Loading %s …", input_path.name)
-    raw_points = load_point_cloud(input_path)
+    cloud_data = load_point_cloud(input_path)
+    raw_points = cloud_data["positions"]
     logger.info("Loaded %d points", len(raw_points))
 
     logger.info("Down-sampling (voxel_size=%.3f) …", voxel_size)
@@ -51,6 +52,12 @@ def process_scan(
         seed=seed,
     )
     logger.info("Detected %d planes", len(planes))
+
+    logger.info("Normalizing walls …")
+    planes = normalize_walls(planes)
+    wall_count = sum(1 for p in planes if p.kind.value == "wall")
+    floor_count = sum(1 for p in planes if p.kind.value == "floor")
+    logger.info("After normalize: %d walls, %d floor", wall_count, floor_count)
 
     model = build_parametric_model(
         source_file=input_path.name,
