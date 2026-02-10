@@ -784,13 +784,18 @@ def _wall_thin_axis(bounds: BBox) -> int:
 def _merge_overlapping_walls(
     planes: list[DetectedPlane],
     overlap_threshold: float = 0.7,
+    containment_threshold: float = 0.8,
 ) -> list[DetectedPlane]:
     """Merge walls that substantially overlap after normalization.
 
-    Two walls are merged when:
+    Two parallel walls are merged when:
     - They are roughly parallel (normals within ~15°).
     - Their thin-axis centres are close (within combined half-thicknesses).
     - The smaller wall's long-axis span is mostly contained within the larger's.
+
+    Additionally, any wall whose XY footprint is mostly contained inside
+    another wall's footprint is removed (catches perpendicular fragments /
+    "pillar" artefacts sitting inside a thicker wall).
 
     The larger wall absorbs the smaller and its bounds expand to cover both.
     """
@@ -899,6 +904,47 @@ def _merge_overlapping_walls(
             )
 
             removed.add(b_idx)
+
+    # --- Second pass: remove walls whose XY footprint is contained inside
+    #     another wall's footprint (catches perpendicular pillars / fragments)
+    for idx_a, a in enumerate(alive):
+        if a in removed:
+            continue
+        ia = infos[a]
+        if ia is None:
+            continue
+
+        for idx_b in range(idx_a + 1, len(alive)):
+            b_idx = alive[idx_b]
+            if b_idx in removed:
+                continue
+            ib = infos[b_idx]
+            if ib is None:
+                continue
+
+            # XY overlap rectangle
+            ox_min = max(ia["bmin"][0], ib["bmin"][0])
+            ox_max = min(ia["bmax"][0], ib["bmax"][0])
+            oy_min = max(ia["bmin"][1], ib["bmin"][1])
+            oy_max = min(ia["bmax"][1], ib["bmax"][1])
+
+            if ox_min >= ox_max or oy_min >= oy_max:
+                continue  # no overlap at all
+
+            overlap_area = (ox_max - ox_min) * (oy_max - oy_min)
+
+            b_area = (ib["bmax"][0] - ib["bmin"][0]) * (ib["bmax"][1] - ib["bmin"][1])
+            a_area = (ia["bmax"][0] - ia["bmin"][0]) * (ia["bmax"][1] - ia["bmin"][1])
+
+            # If b (smaller by length sort) is inside a, remove b
+            if b_area > 1e-9 and overlap_area / b_area >= containment_threshold:
+                removed.add(b_idx)
+                continue
+
+            # If a is inside b (rare, since sorted by length), remove a
+            if a_area > 1e-9 and overlap_area / a_area >= containment_threshold:
+                removed.add(a)
+                break
 
     # Rebuild output
     out: list[DetectedPlane] = []
