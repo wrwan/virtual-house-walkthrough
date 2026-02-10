@@ -8,7 +8,7 @@ from pathlib import Path
 from packages.core.types import ParametricModel
 from packages.pipeline.loader import load_point_cloud
 from packages.pipeline.parametric import build_parametric_model
-from packages.pipeline.plane_detection import detect_planes
+from packages.pipeline.plane_detection import detect_planes, normalize_walls
 from packages.pipeline.preprocess import compute_bounds, voxel_downsample
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,10 @@ def process_scan(
         seed=seed,
     )
     logger.info("Detected %d planes", len(planes))
+
+    logger.info("Normalizing walls …")
+    planes = normalize_walls(planes)
+    logger.info("Normalized to %d walls", len(planes))
 
     model = build_parametric_model(
         source_file=input_path.name,

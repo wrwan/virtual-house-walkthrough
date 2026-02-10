@@ -760,6 +760,9 @@ def normalize_walls(
     # ── 5. snap wall endpoints to meet at corners ─────────────
     result = _snap_corners(result, snap_distance=1.0)
 
+    # ── 6. merge walls that overlap after normalization ───────
+    result = _merge_overlapping_walls(result)
+
     logger.info("  ✅ Normalized %d walls", len(result))
     return result
 
@@ -776,6 +779,155 @@ def _wall_thin_axis(bounds: BBox) -> int:
     dx = bounds.max.x - bounds.min.x
     dy = bounds.max.y - bounds.min.y
     return 0 if dx < dy else 1
+
+
+def _merge_overlapping_walls(
+    planes: list[DetectedPlane],
+    overlap_threshold: float = 0.7,
+) -> list[DetectedPlane]:
+    """Merge walls that substantially overlap after normalization.
+
+    Two walls are merged when:
+    - They are roughly parallel (normals within ~15°).
+    - Their thin-axis centres are close (within combined half-thicknesses).
+    - The smaller wall's long-axis span is mostly contained within the larger's.
+
+    The larger wall absorbs the smaller and its bounds expand to cover both.
+    """
+    if len(planes) < 2:
+        return planes
+
+    alive = list(range(len(planes)))  # indices of walls still present
+
+    # Pre-compute per-wall data
+    infos: list[dict | None] = []
+    for p in planes:
+        if p.bounds is None:
+            infos.append(None)
+            continue
+        b = p.bounds
+        bmin = np.array([b.min.x, b.min.y, b.min.z])
+        bmax = np.array([b.max.x, b.max.y, b.max.z])
+        dims = bmax - bmin
+        thin_xy = int(np.argmin(dims[:2]))
+        long_xy = 1 - thin_xy
+        n2d = np.array([p.normal.x, p.normal.y])
+        n2d_len = np.linalg.norm(n2d)
+        if n2d_len > 1e-6:
+            n2d = n2d / n2d_len
+        infos.append({
+            "bmin": bmin,
+            "bmax": bmax,
+            "dims": dims,
+            "thin": thin_xy,
+            "long": long_xy,
+            "n2d": n2d,
+            "length": dims[long_xy],
+            "thickness": dims[thin_xy],
+            "thin_center": (bmin[thin_xy] + bmax[thin_xy]) / 2.0,
+        })
+
+    # Sort alive by wall length descending so larger walls absorb smaller ones
+    alive.sort(key=lambda i: -(infos[i]["length"] if infos[i] else 0))
+
+    removed: set[int] = set()
+
+    for idx_a, a in enumerate(alive):
+        if a in removed:
+            continue
+        info_a = infos[a]
+        if info_a is None:
+            continue
+
+        for idx_b in range(idx_a + 1, len(alive)):
+            b_idx = alive[idx_b]
+            if b_idx in removed:
+                continue
+            info_b = infos[b_idx]
+            if info_b is None:
+                continue
+
+            # Check parallel: dot product of 2D normals should be ~1
+            dot = abs(float(np.dot(info_a["n2d"], info_b["n2d"])))
+            if dot < 0.95:  # ~18° tolerance
+                continue
+
+            # Must share the same thin axis orientation
+            if info_a["thin"] != info_b["thin"]:
+                continue
+
+            thin = info_a["thin"]
+            long_ax = info_a["long"]
+
+            # Check thin-axis proximity: centres should be within combined half-thicknesses
+            max_gap = (info_a["thickness"] + info_b["thickness"]) / 2.0
+            thin_dist = abs(info_a["thin_center"] - info_b["thin_center"])
+            if thin_dist > max_gap:
+                continue
+
+            # Check long-axis overlap: how much of b is inside a?
+            a_min_l = info_a["bmin"][long_ax]
+            a_max_l = info_a["bmax"][long_ax]
+            b_min_l = info_b["bmin"][long_ax]
+            b_max_l = info_b["bmax"][long_ax]
+
+            overlap_min = max(a_min_l, b_min_l)
+            overlap_max = min(a_max_l, b_max_l)
+            overlap_len = max(0.0, overlap_max - overlap_min)
+
+            b_length = info_b["length"]
+            if b_length < 1e-6:
+                removed.add(b_idx)
+                continue
+
+            overlap_ratio = overlap_len / b_length
+            if overlap_ratio < overlap_threshold:
+                continue
+
+            # Merge: expand a to cover b's long-axis span, keep a's thin axis
+            info_a["bmin"][long_ax] = min(a_min_l, b_min_l)
+            info_a["bmax"][long_ax] = max(a_max_l, b_max_l)
+            info_a["length"] = info_a["bmax"][long_ax] - info_a["bmin"][long_ax]
+
+            # Accumulate inlier counts
+            planes[a] = DetectedPlane(
+                kind=planes[a].kind,
+                normal=planes[a].normal,
+                offset=planes[a].offset,
+                inlier_count=planes[a].inlier_count + planes[b_idx].inlier_count,
+                bounds=planes[a].bounds,  # will be rebuilt below
+            )
+
+            removed.add(b_idx)
+
+    # Rebuild output
+    out: list[DetectedPlane] = []
+    for i in alive:
+        if i in removed:
+            continue
+        info = infos[i]
+        if info is None:
+            out.append(planes[i])
+            continue
+        bmin = info["bmin"]
+        bmax = info["bmax"]
+        new_bounds = BBox(
+            min=Vec3(x=float(bmin[0]), y=float(bmin[1]), z=float(bmin[2])),
+            max=Vec3(x=float(bmax[0]), y=float(bmax[1]), z=float(bmax[2])),
+        )
+        out.append(DetectedPlane(
+            kind=planes[i].kind,
+            normal=planes[i].normal,
+            offset=planes[i].offset,
+            inlier_count=planes[i].inlier_count,
+            bounds=new_bounds,
+        ))
+
+    merged_count = len(planes) - len(out)
+    if merged_count:
+        logger.info("  🔀 Merged %d overlapping walls → %d remain", merged_count, len(out))
+
+    return out
 
 
 def _snap_corners(
