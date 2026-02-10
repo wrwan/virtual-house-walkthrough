@@ -5,6 +5,7 @@
  * together and starts the render loop.
  */
 
+import * as THREE from 'three';
 import { renderer, scene, camera, controls } from './state.js';
 
 // Side-effect imports — each module registers its own event listeners.
@@ -14,10 +15,22 @@ import './controls.js';
 // wallTools exports the per-frame label-updater used in animate().
 import { updateFloatingLabels } from './wallTools.js';
 
+// walkMode exports the per-frame walk updater.
+import { isWalking, updateWalk } from './walkMode.js';
+
 // -- Render loop -----------------------------------------------------
+const clock = new THREE.Clock();
+
 function animate() {
   requestAnimationFrame(animate);
-  controls.update();
+  const delta = clock.getDelta();
+
+  if (isWalking()) {
+    updateWalk(delta);
+  } else {
+    controls.update();
+  }
+
   updateFloatingLabels();
   renderer.render(scene, camera);
 }

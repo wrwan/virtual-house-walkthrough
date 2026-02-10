@@ -102,6 +102,99 @@
       background: #c62828; color: #fff;
     }
     .wall-edit-label button:hover { background: #b71c1c; }
+
+    /* ── Walkthrough mode ──────────────────────────────────── */
+    #walk-overlay {
+      position: fixed; inset: 0;
+      pointer-events: none;
+      z-index: 15;
+    }
+    #walk-overlay.hidden { display: none; }
+
+    #walk-crosshair {
+      position: fixed;
+      top: 50%; left: 50%;
+      width: 4px; height: 4px;
+      margin: -2px 0 0 -2px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.55);
+      box-shadow: 0 0 6px rgba(0, 0, 0, 0.4);
+      pointer-events: none;
+    }
+
+    #walk-height-panel {
+      position: fixed;
+      right: 20px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      pointer-events: auto;
+      background: rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      padding: 16px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .walk-height-label {
+      font-size: 0.65rem;
+      color: #888;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    #walk-height {
+      writing-mode: vertical-lr;
+      direction: rtl;
+      height: 140px;
+      width: 20px;
+      accent-color: #6c63ff;
+      cursor: pointer;
+    }
+    #walk-height-value {
+      font-size: 0.8rem;
+      color: #ccc;
+      font-variant-numeric: tabular-nums;
+    }
+
+    #walk-hint {
+      position: fixed;
+      bottom: 28px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      padding: 10px 28px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      font-size: 0.8rem;
+      color: #bbb;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+
+    #walk-exit {
+      position: fixed;
+      bottom: 28px;
+      right: 20px;
+      pointer-events: auto;
+      padding: 10px 22px;
+      background: rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      color: #eee;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.82rem;
+      font-weight: 500;
+      transition: background 0.2s;
+    }
+    #walk-exit:hover { background: rgba(198, 40, 40, 0.6); }
   </style>
 </head>
 <body>
@@ -123,6 +216,18 @@
 
   <!-- Floating labels for drawn wall previews -->
   <div id="floating-labels"></div>
+
+  <!-- Walk-through overlay -->
+  <div id="walk-overlay" class="hidden">
+    <div id="walk-crosshair"></div>
+    <div id="walk-height-panel">
+      <span class="walk-height-label">Eye Height</span>
+      <input type="range" id="walk-height" min="0.5" max="3.0" step="0.05" value="1.65" />
+      <span id="walk-height-value">1.65 m</span>
+    </div>
+    <div id="walk-hint"></div>
+    <button id="walk-exit">Exit Walkthrough</button>
+  </div>
 
   <!-- HUD (shown after load) -->
   <div id="hud" style="display:none">
@@ -153,6 +258,8 @@
     <button id="btn-edit-walls">Edit Walls</button>
     <button id="btn-normalize">Normalize Walls</button>
     <div id="action-status" style="font-size:0.8rem;color:#aaa;margin-top:6px;min-height:1.2rem;"></div>
+    <hr style="border:none;border-top:1px solid #333;margin:10px 0 6px;" />
+    <button id="btn-walkthrough">Walkthrough</button>
     <button id="btn-reset">Reset Camera</button>
     <button id="btn-new" style="background:#444; margin-top:4px;">Upload New</button>
   </div>
